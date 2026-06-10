@@ -1,8 +1,13 @@
 /* ══════════════════════════════════════
-   Story Tracker — Styling
+   Story Tracker — Consolidated Stylesheet
    ══════════════════════════════════════ */
 
-/* Modal */
+/* Standard layout resets to prevent padding clipping on small screens */
+#st-modal, #st-modal *, .st-hud, .st-hud * {
+    box-sizing: border-box !important;
+}
+
+/* --- Shared Structural Layout --- */
 #st-modal { position:fixed; inset:0; z-index:10000; display:flex; align-items:center; justify-content:center; }
 .st-overlay { position:absolute; inset:0; background:rgba(0,0,0,.65); }
 .st-dialog {
@@ -39,7 +44,7 @@
 .st-body { flex:1; overflow-y:auto; padding:16px 18px; }
 .st-no-data { text-align:center; padding:40px 20px; opacity:.4; }
 
-/* Sections */
+/* Sections & Grid */
 .st-section {
     background:rgba(255,255,255,.02); border:1px solid rgba(255,160,100,.1);
     border-radius:8px; padding:14px 16px; margin-bottom:14px;
@@ -49,7 +54,7 @@
 .st-item-label { font-size:11px; opacity:.5; text-transform:uppercase; }
 .st-item-val { font-size:13px; font-weight:600; color:#ddd; }
 
-/* Characters */
+/* Characters Cards */
 .st-char-list { display:flex; flex-direction:column; gap:8px; }
 .st-char-card { background:rgba(0,0,0,.15); padding:8px 10px; border-radius:6px; border-left:3px solid #ffa064; }
 .st-char-name { font-size:12px; font-weight:700; color:#ccc; margin-bottom:2px; }
@@ -71,32 +76,11 @@
 }
 .st-auto-info { flex:1; text-align:right; font-size:11px; color:#4caf50; opacity:.7; }
 
-/* HUD Widget */
-.st-hud {
-    position:fixed; z-index:9989; width:260px;
-    background:rgba(20,24,32,.93); border:1px solid rgba(255,160,100,.2);
-    border-radius:10px; backdrop-filter:blur(8px);
-    box-shadow:0 4px 20px rgba(0,0,0,.4); transition:all .25s;
-}
-.st-hud-pos-bottom-right { bottom:60px; right:10px; }
-.st-hud-pos-bottom-left { bottom:60px; left:10px; }
-.st-hud-pos-top-right { top:60px; right:10px; }
-.st-hud-pos-top-left { top:60px; left:10px; }
+/* Chat Trigger */
+.st-trigger { cursor:pointer; font-size:20px; padding:3px; color:#ffa064; transition:all .2s; }
+.st-trigger:hover { color:#ffbd91; transform:scale(1.1); }
 
-.st-hud-head {
-    display:flex; align-items:center; gap:6px; padding:8px 12px; cursor:pointer;
-    font-size:12px; font-weight:700; color:#ffa064; background:rgba(255,160,100,.05);
-    border-bottom:1px solid rgba(255,160,100,.1);
-}
-.st-hud-body { padding:10px; max-height:60vh; overflow-y:auto; cursor:pointer;}
-.st-hud-collapsed .st-hud-body { display:none; }
-
-.st-hud-row { font-size:11px; color:#ccc; margin-bottom:4px; }
-.st-hud-row strong { color:#ffa064; }
-.st-hud-char { font-size:10px; background:rgba(0,0,0,.2); padding:4px; border-radius:4px; margin-top:4px; border-left:2px solid #ffa064; }
-.st-hud-char-name { font-weight:700; color:#ddd; }
-
-/* Weather icon color */
+/* Weather Icons Colors */
 .st-hud-row .fa-sun { color: #ffd166; }
 .st-hud-row .fa-cloud-sun { color: #ffc87a; }
 .st-hud-row .fa-cloud { color: #aab4c8; }
@@ -105,11 +89,7 @@
 .st-hud-row .fa-bolt { color: #f4d35e; }
 .st-hud-row .fa-smog { color: #9aaa9a; }
 
-/* Chat Trigger */
-.st-trigger { cursor:pointer; font-size:20px; padding:3px; color:#ffa064; transition:all .2s; }
-.st-trigger:hover { color:#ffbd91; transform:scale(1.1); }
-
-/* ── Outfit Section (linked from Inventory) ── */
+/* Outfit Integration Styles */
 .st-outfit-source { font-size:10px; font-weight:400; opacity:.45; margin-left:5px; }
 .st-outfit-grid { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
 .st-outfit-item {
@@ -123,14 +103,6 @@
     font-size:11px; font-weight:700; color:#7ab8d4;
     margin:8px 0 4px; display:flex; align-items:center; gap:5px;
 }
-
-/* HUD outfit rows */
-.st-hud-outfit {
-    font-size:10px; background:rgba(0,0,0,.2); padding:4px;
-    border-radius:4px; margin-top:3px; border-left:2px solid #7ab8d4;
-}
-
-/* ── Inline Outfit inside Character Cards ── */
 .st-char-inline-outfit {
     margin-top:8px; padding-top:7px;
     border-top:1px solid rgba(255,160,100,.1);
@@ -138,4 +110,145 @@
 .st-char-inline-outfit-hdr {
     font-size:11px; font-weight:700; color:#7ab8d4;
     margin-bottom:5px; display:flex; align-items:center; gap:5px;
+}
+
+/* --- HUD Widget (Expanded Base Styles) --- */
+.st-hud {
+    position:fixed; z-index:9989; width:260px;
+    background:rgba(20,24,32,.93); border:1px solid rgba(255,160,100,.2);
+    border-radius:10px; backdrop-filter:blur(8px);
+    box-shadow:0 4px 20px rgba(0,0,0,.4); 
+    /* Force high priority over theme transitions to eliminate drag input delay */
+    transition: width 0.2s ease, height 0.2s ease, border-radius 0.2s ease, background 0.2s ease, left 0s !important, top 0s !important, right 0s !important, bottom 0s !important;
+    user-select: none;
+    touch-action: none;
+    top: 150px;
+    right: 25px;
+}
+
+.st-hud-head {
+    display:flex; align-items:center; gap:6px; padding:8px 12px; cursor:pointer;
+    font-size:12px; font-weight:700; color:#ffa064; background:rgba(255,160,100,.05);
+    border-bottom:1px solid rgba(255,160,100,.1);
+    user-select: none;
+    -webkit-user-select: none;
+    transition: all 0.2s ease;
+}
+
+.st-hud-body { padding:10px; max-height:60vh; overflow-y:auto; cursor:pointer; }
+
+.st-hud-row { font-size:11px; color:#ccc; margin-bottom:4px; }
+.st-hud-row strong { color:#ffa064; }
+.st-hud-char { font-size:10px; background:rgba(0,0,0,.2); padding:4px; border-radius:4px; margin-top:4px; border-left:2px solid #ffa064; }
+.st-hud-char-name { font-weight:700; color:#ddd; }
+.st-hud-outfit {
+    font-size:10px; background:rgba(0,0,0,.2); padding:4px;
+    border-radius:4px; margin-top:3px; border-left:2px solid #7ab8d4;
+}
+
+/* --- HUD Collapsed Floating Bubble Layout --- */
+.st-hud.st-hud-collapsed {
+    width: 48px !important;
+    height: 48px !important;
+    border-radius: 50% !important;
+    overflow: hidden !important;
+    background: rgba(255, 160, 100, 0.95) !important;
+    border-color: #ffa064 !important;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.5) !important;
+}
+.st-hud-collapsed .st-hud-head {
+    padding: 0 !important;
+    background: transparent !important;
+    border: none !important;
+    width: 100% !important;
+    height: 100% !important;
+    justify-content: center !important;
+}
+.st-hud-collapsed .st-hud-head-text,
+.st-hud-collapsed .st-hud-head .fa-chevron-up {
+    display: none !important;
+}
+.st-hud-collapsed .st-hud-head i.fa-book-open-reader {
+    margin: 0 !important;
+    font-size: 20px !important;
+    color: #141820 !important;
+}
+.st-hud-collapsed .st-hud-body {
+    display: none !important;
+}
+
+/* --- Mobile Specific Overrides --- */
+@media screen and (max-width: 768px) {
+    .st-hud:not(.st-hud-collapsed) {
+        width:220px; /* Slimmer footprint on portrait phone screen widths */
+        background:rgba(15,18,24,.96); border:1px solid rgba(255,160,100,.25);
+        border-radius:8px; backdrop-filter:blur(6px);
+        box-shadow:0 3px 15px rgba(0,0,0,.5); 
+        top: 100px;
+        right: 15px;
+    }
+
+    .st-hud-head:not(.st-hud-collapsed *) {
+        gap:5px; padding:10px 12px;
+        font-size:11px; background:rgba(255,160,100,.08);
+        border-bottom:1px solid rgba(255,160,100,.15);
+    }
+
+    .st-hud-body { padding:8px; max-height:50vh; }
+
+    .st-hud-row { font-size:10px; color:#bbb; margin-bottom:5px; line-height:1.2; }
+    .st-hud-char { font-size:9.5px; background:rgba(0,0,0,.3); padding:5px; border-radius:4px; margin-top:5px; border-left:2px solid #ffa064; }
+    .st-hud-outfit {
+        font-size:9px; background:rgba(0,0,0,.3); padding:4px;
+        border-radius:4px; margin-top:4px; border-left:2px solid #7ab8d4;
+    }
+
+    /* Modal dialog overrides to prevent screen truncation on mobile browsers */
+    .st-dialog {
+        width: 94vw !important;
+        max-width: 94vw !important;
+        height: 84vh !important; /* Rigorously evaluates height on mobile to resolve WebKit flex container scroll bugs */
+        max-height: 84vh !important;
+        margin: auto !important;
+        border-radius: 12px !important;
+    }
+
+    .st-header {
+        padding: 10px 12px !important;
+    }
+
+    .st-title {
+        font-size: 15px !important;
+    }
+
+    .st-body {
+        padding: 12px 10px !important;
+        flex: 1 1 auto !important;
+        min-height: 0 !important; /* Forces layout containers to collapse properly on iOS */
+        overflow-y: auto !important;
+        -webkit-overflow-scrolling: touch; /* Momentum scrolling */
+    }
+
+    .st-grid {
+        grid-template-columns: 1fr !important; /* Collapses dual grid column cards into a vertical layout */
+        gap: 8px !important;
+    }
+
+    /* Stacks elements vertically on mobile so buttons do not compress and overflow */
+    .st-footer {
+        flex-direction: column !important;
+        align-items: stretch !important;
+        gap: 8px !important;
+        padding: 10px 12px !important;
+    }
+
+    .st-auto-info {
+        text-align: center !important;
+        width: 100% !important;
+        margin-top: 2px !important;
+    }
+
+    #st-f-update {
+        width: 100% !important;
+    }
 }
