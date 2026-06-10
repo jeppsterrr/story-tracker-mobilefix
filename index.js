@@ -95,6 +95,29 @@ jQuery(async function () {
     } catch (e) { console.error("[Story Tracker] Init error:", e); }
 });
 
+// --- Active Chat Failsafe Check ---
+function isChatOpen() {
+    try {
+        var context = (typeof SillyTavern !== "undefined" && typeof SillyTavern.getContext === "function") 
+            ? SillyTavern.getContext() 
+            : null;
+        var chat = (context && context.chat) ? context.chat : (scriptModule ? scriptModule.chat : null);
+        var chatId = (context && context.chatId) ? context.chatId : (scriptModule ? scriptModule.chatId : null);
+        var charId = (context && context.characterId !== undefined) ? context.characterId : (scriptModule ? scriptModule.this_chid : null);
+        var groupId = (context && context.groupId !== undefined) ? context.groupId : (scriptModule ? scriptModule.groupId : null);
+
+        if (!chat || chat.length === 0 || !chatId) {
+            return false;
+        }
+        if (charId === null && groupId === null) {
+            return false;
+        }
+        return true;
+    } catch (e) {
+        return false;
+    }
+}
+
 // --- Data Management ---
 function loadSettings() {
     if(extSettings) {
@@ -119,6 +142,10 @@ function makeDefaultData() {
 }
 
 function loadStoryData() {
+    if (!isChatOpen()) {
+        storyData = null;
+        return;
+    }
     var meta = scriptModule ? scriptModule.chat_metadata : null;
     var stored = (meta && meta[DATA_KEY]) ? meta[DATA_KEY] : null;
     if (stored) {
@@ -153,7 +180,7 @@ function clampHudPosition(x, y) {
 }
 
 function saveStoryData() {
-    if (!scriptModule || !scriptModule.chat_metadata) return;
+    if (!isChatOpen() || !scriptModule || !scriptModule.chat_metadata) return;
     storyData._msgCount = msgCounter;
     scriptModule.chat_metadata[DATA_KEY] = storyData;
     if (typeof saveMetaFn === "function") {
@@ -290,6 +317,15 @@ async function recoverProfileIfNeeded() {
 
 
 async function doLLMUpdate() {
+    // Failsafe: abort scene generation if no active chat open
+    if (!isChatOpen()) {
+        console.warn("[Story Tracker] Aborted scene generation: No active chat open.");
+        if (typeof toastr !== "undefined") {
+            toastr.warning("Story Tracker: Generation aborted. No active chat is open.");
+        }
+        return;
+    }
+
     if (!genRaw) throw new Error("Raw LLM generation not available.");
 
     let wasTr = storyData._translated;
@@ -438,7 +474,7 @@ function syncToCharTracker() {
 // --- Inventory Integration ---
 var INV_SLOTS        = ["head","torso","legs","feet","hands","lefthand","righthand","accessory1","accessory2"];
 var INV_SLOT_LABELS  = { head:"Head", torso:"Torso", legs:"Legs", feet:"Feet", hands:"Hands", lefthand:"Left Hand", righthand:"Right Hand", accessory1:"Accessory 1", accessory2:"Accessory 2" };
-var INV_SLOT_ICONS   = { head:"🎩", torso:"👕", legs:"👖", feet:"👟", hands:"🧤", lefthand:"🤚", righthand:"✋", accessory1:"💍", accessory2:"💍" };
+var INV_SLOT_ICONS  = { head:"🎩", torso:"👕", legs:"👖", feet:"👟", hands:"🧤", lefthand:"🤚", righthand:"✋", accessory1:"💍", accessory2:"💍" };
 
 function getInventoryOutfit() {
     try {
@@ -477,6 +513,7 @@ function getInventoryOutfit() {
 
 // --- Context Injection ---
 function injectContextToChat() {
+    if (!isChatOpen()) return;
     if (!settings.enabled || !settings.injectToContext || !storyData || !storyData._initialized) return;
     
     let loc = storyData._origLocation || storyData.location;
@@ -552,16 +589,20 @@ function bindEvents() {
 
         if (!settings.enabled || busy) return;
 
+        // Failsafe: abort scene autoUpdate if no active chat open
+        if (!isChatOpen()) {
+            console.warn("[Story Tracker] Event ignored: No active chat is open.");
+            return;
+        }
+
         let autoUpdate = (storyData && storyData.autoUpdate !== undefined) ? storyData.autoUpdate : settings.autoUpdate;
         let autoUpdateInterval = (storyData && storyData.autoUpdateInterval !== undefined) ? storyData.autoUpdateInterval : settings.autoUpdateInterval;
 
         msgCounter++;
         saveStoryData();
         
-        let chatLen = (scriptModule && scriptModule.chat) ? scriptModule.chat.length : 0;
-        let isFirstMsg = chatLen <= 2 && !storyData._initialized;
-        
-        if (isFirstMsg || (autoUpdate && msgCounter % autoUpdateInterval === 0)) {
+        // Trigger on interval milestones only (removed automatically generating on a new chat)
+        if (autoUpdate && msgCounter > 0 && msgCounter % autoUpdateInterval === 0) {
             busy = true;
             try {
                 await doLLMUpdate();
@@ -685,10 +726,26 @@ function buildModal() {
         $("#st-tab-current, #st-tab-history").hide();
         $("#" + $(this).data("target")).show();
     });
+
+    // Delete past summary from history
+    $(document).on("click", ".st-del-hist", function() {
+        var index = parseInt($(this).data("index"), 10);
+        if (storyData && storyData.history && !isNaN(index)) {
+            storyData.history.splice(index, 1);
+            if (storyData._origHistory && storyData._origHistory.length > index) {
+                storyData._origHistory.splice(index, 1);
+            }
+            saveStoryData();
+            renderModal();
+        }
+    });
 }
 
 function renderModal() {
-    if (!storyData) return;
+    if (!isChatOpen() || !storyData) {
+        $("#st-no-data").show(); $("#st-content-area").hide();
+        return;
+    }
     if (!storyData._initialized) {
         $("#st-no-data").show(); $("#st-content-area").hide();
     } else {
@@ -752,9 +809,15 @@ function renderModal() {
     if (storyData.history && storyData.history.length > 0) {
         storyData.history.forEach((h, i) => {
             let weatherInfo = (h.temperature || h.weather) ? ` | ${h.temperature || ""}${h.weather ? " " + esc(h.weather) : ""}` : "";
-            hHtml += `<div class="st-history-item">
-                <div class="st-history-meta"><span>Update at Msg #${h.msg}</span><span>${h.time} | ${esc(h.loc)}${weatherInfo}</span></div>
-                <div class="st-history-sum">${esc(h.events)}</div>
+            hHtml += `<div class="st-history-item" style="position: relative;">
+                <div class="st-history-meta" style="display: flex; justify-content: space-between; align-items: center;">
+                    <span>Update at Msg #${h.msg}</span>
+                    <span style="display: flex; align-items: center; gap: 8px;">
+                        ${h.time} | ${esc(h.loc)}${weatherInfo}
+                        <button class="st-del-hist st-hdr-btn menu_button" data-index="${i}" title="Delete Summary" style="padding: 2px 6px !important; font-size: 10px; color: #ff5555; border-color: rgba(255,85,85,0.25); background: transparent;"><i class="fa-solid fa-trash-can"></i></button>
+                    </span>
+                </div>
+                <div class="st-history-sum" style="margin-top: 4px;">${esc(h.events)}</div>
             </div>`;
         });
     } else { hHtml = "<div class='st-no-data'>No history yet.</div>"; }
@@ -765,7 +828,7 @@ function renderModal() {
 }
 
 function updateSettingsUI() {
-    if (!storyData) return;
+    if (!isChatOpen() || !storyData) return;
 
     let autoUpdate = (storyData.autoUpdate !== undefined) ? storyData.autoUpdate : settings.autoUpdate;
     let autoUpdateInterval = (storyData.autoUpdateInterval !== undefined) ? storyData.autoUpdateInterval : settings.autoUpdateInterval;
@@ -788,6 +851,16 @@ function renderAutoInfo() {
 
 async function doManualUpdate() {
     if (busy) return;
+    
+    // Failsafe: abort manual update if no active chat open
+    if (!isChatOpen()) {
+        console.warn("[Story Tracker] Aborted manual update: No active chat open.");
+        if (typeof toastr !== "undefined") {
+            toastr.warning("Story Tracker: Manual update aborted. No active chat is open.");
+        }
+        return;
+    }
+
     busy = true;
     var $b = $("#st-f-update").prop("disabled", true).html('<i class="fa-solid fa-spinner fa-spin"></i> Analyzing...');
     try {
@@ -954,7 +1027,7 @@ function renderHUD() {
     $("#st-hud").toggle(settings.showHUD);
     applyHudStyle();
 
-    if (!storyData || !storyData._initialized) {
+    if (!isChatOpen() || !storyData || !storyData._initialized) {
         $("#st-hud-body").html("<div style='text-align:center;opacity:.5;font-size:10px;'>Waiting...</div>"); return;
     }
     let dow = getDayOfWeek(storyData.date);
@@ -1025,17 +1098,6 @@ function buildChatButton() {
         $(document).on("click", "#st-trigger", function() { loadStoryData(); renderModal(); $("#st-modal").fadeIn(150); updateSettingsUI(); });
     }
     toggleChatButtonVisibility();
-}
-
-function toggleChatButtonVisibility() {
-    var $trigger = $("#st-trigger");
-    if ($trigger.length) {
-        if (settings.enabled && settings.showChatButton) {
-            $trigger.show();
-        } else {
-            $trigger.hide();
-        }
-    }
 }
 
 // --- Settings UI ---
@@ -1130,6 +1192,17 @@ function buildSettingsPanel() {
     $("#st-s-open").on("click", function() { loadStoryData(); renderModal(); $("#st-modal").fadeIn(150); });
 
     updateSettingsUI();
+}
+
+function toggleChatButtonVisibility() {
+    var $trigger = $("#st-trigger");
+    if ($trigger.length) {
+        if (settings.enabled && settings.showChatButton) {
+            $trigger.show();
+        } else {
+            $trigger.hide();
+        }
+    }
 }
 
 // --- Translation ---
