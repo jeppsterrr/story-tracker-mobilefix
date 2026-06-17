@@ -142,6 +142,24 @@ function loadSettings() {
     }
 }
 
+// --- Dynamic Viewport Border Calculations ---
+function clampHudPosition(x, y) {
+    var $h = $("#st-hud");
+    if (!$h.length) return { x: x, y: y };
+
+    var hudWidth = $h.outerWidth() || 260;
+    var hudHeight = $h.outerHeight() || 200;
+
+    var margin = 10;
+    var maxX = window.innerWidth - hudWidth - margin;
+    var maxY = window.innerHeight - hudHeight - margin;
+
+    var clampedX = Math.max(margin, Math.min(x, maxX));
+    var clampedY = Math.max(margin, Math.min(y, maxY));
+
+    return { x: clampedX, y: clampedY };
+}
+
 function save() { if(saveFn) saveFn(); }
 
 function makeDefaultData() {
@@ -185,24 +203,6 @@ function loadStoryData() {
         msgCounter = 0;
         lastCountedMsgId = storyData._lastCountedMsgId;
     }
-}
-
-// --- Dynamic Viewport Border Calculations ---
-function clampHudPosition(x, y) {
-    var $h = $("#st-hud");
-    if (!$h.length) return { x: x, y: y };
-
-    var hudWidth = $h.outerWidth() || 260;
-    var hudHeight = $h.outerHeight() || 200;
-
-    var margin = 10;
-    var maxX = window.innerWidth - hudWidth - margin;
-    var maxY = window.innerHeight - hudHeight - margin;
-
-    var clampedX = Math.max(margin, Math.min(x, maxX));
-    var clampedY = Math.max(margin, Math.min(y, maxY));
-
-    return { x: clampedX, y: clampedY };
 }
 
 function saveStoryData() {
@@ -916,6 +916,11 @@ async function doManualUpdate() {
     var $b = $("#st-f-update").prop("disabled", true).html('<i class="fa-solid fa-spinner fa-spin"></i> Analyzing...');
     try {
         await doLLMUpdate();
+        
+        // Reset the message counter for auto-updates and save
+        msgCounter = 0;
+        saveStoryData();
+        
         renderModal(); renderHUD();
         if(typeof toastr !== "undefined") toastr.success("Story updated!");
     } catch(e) { if(typeof toastr !== "undefined") toastr.error(e.message); }
@@ -1120,7 +1125,7 @@ function renderHUD() {
                              c.name.toLowerCase() === "вы" ||
                              c.name === "{{user}}";
                 if (isUser) {
-                    var wearNames = hudOutfit.userEquipped.map(function(it) { return it.name; }).join(", ");
+                    var wearNames = outfit.userEquipped.map(function(it) { return it.name; }).join(", ");
                     hudStateText += ", wearing " + wearNames;
                 }
             }
