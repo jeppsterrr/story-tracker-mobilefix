@@ -187,6 +187,42 @@ var worldBusy = false;  // world agent lock
 var relsBusy = false;   // relationship tracker lock
 var relMsgCounter = 0;  // counts messages since last relationship checkpoint
 
+// Global lock - returns true if ANY agent is currently generating.
+// Prevents concurrent API requests when multiple agents fire at once.
+function anyBusy() { return busy || worldBusy || relsBusy; }
+
+// --- Agent Queue ---
+// Serialises all agent API calls so rate-limited backends (e.g. KoboldAI / APIs that only
+// allow one concurrent generation) never receive two requests at the same time.
+// Every automatic agent trigger goes through enqueueAgent() instead of firing directly.
+var agentQueue = [];
+var agentQueueRunning = false;
+var QUEUE_GAP_MS = 1200; // minimum ms to wait between consecutive agent tasks
+
+function enqueueAgent(label, taskFn) {
+    agentQueue.push({ label: label, task: taskFn });
+    if (!agentQueueRunning) processAgentQueue();
+}
+
+async function processAgentQueue() {
+    if (agentQueueRunning) return;
+    agentQueueRunning = true;
+    while (agentQueue.length > 0) {
+        var entry = agentQueue.shift();
+        console.log("[Story Tracker] Queue → running: " + entry.label);
+        try {
+            await entry.task();
+        } catch (e) {
+            console.error("[Story Tracker] Queue error in '" + entry.label + "':", e);
+        }
+        if (agentQueue.length > 0) {
+            // Brief pause between tasks to respect rate limits
+            await new Promise(function (res) { setTimeout(res, QUEUE_GAP_MS); });
+        }
+    }
+    agentQueueRunning = false;
+}
+
 // --- Init ---
 jQuery(async function () {
     try {
@@ -949,9 +985,12 @@ function injectContextToChat() {
                    `</world_progression>`;
     }
 
-    // Relationship context — built as its own variable for separate depth injection
-    var relInj = "";
-    if (settings.injectRelationsContext && relationshipData && relationshipData._initialized &&
+    let finalInj = "";
+    if (sceneInj) finalInj += sceneInj;
+    if (worldInj) finalInj += (finalInj ? "\n" : "") + worldInj;
+
+    // Relationship context injection — only edges involving characters currently in scene
+    if (settings.injectRelationsContext && relationshipData && relationshipData._initialized && 
         relationshipData.edges && relationshipData.edges.length > 0) {
         var sceneNames = new Set((storyData && storyData.characters || []).map(function(c) { return c.name; }));
         var relevantEdges = relationshipData.edges.filter(function(e) {
@@ -962,39 +1001,18 @@ function injectContextToChat() {
                 var sign = e.strength >= 0 ? "+" : "";
                 return e.from + " \u2194 " + e.to + ": " + e.type + " (" + sign + (e.strength || 0).toFixed(1) + ") \u2014 " + e.summary;
             }).join("\n");
-            relInj = "<relationship_dynamics>\n" + relLines + "\n</relationship_dynamics>";
+            var relInj = "<relationship_dynamics>\n" + relLines + "\n</relationship_dynamics>";
+            finalInj += (finalInj ? "\n" : "") + relInj;
         }
     }
 
-    if (!sceneInj && !worldInj && !finalInj) return;
-
+    if (!finalInj) return;
+    
     try {
+        var ex = scriptModule.chat_metadata.authorsNote || "";
         var mk = "<!-- ST_INJECT -->", emk = "<!-- /ST_INJECT -->";
-
-        // Depth 2 — Scene context (time, location, positions, weather)
-        if (sceneInj) {
-            var ex2 = scriptModule.chat_metadata.authorsNote || "";
-            var cl2 = ex2.replace(new RegExp(mk + "[\\s\\S]*?" + emk, "g"), "").trim();
-            scriptModule.chat_metadata.authorsNote = cl2 + (cl2 ? "\n" : "") + mk + "\n" + sceneInj + "\n" + emk;
-            scriptModule.chat_metadata.authorsNoteDepth = 2;
-        }
-
-        // Depth 3 — Relationship dynamics
-        if (relInj) {
-            var ex3 = scriptModule.chat_metadata.authorsNote2 || "";
-            var cl3 = ex3.replace(new RegExp(mk + "[\\s\\S]*?" + emk, "g"), "").trim();
-            scriptModule.chat_metadata.authorsNote2 = cl3 + (cl3 ? "\n" : "") + mk + "\n" + relInj + "\n" + emk;
-            scriptModule.chat_metadata.authorsNoteDepth2 = 3;
-        }
-
-        // Depth 4 — World agent events (offscreen, bleeds in organically)
-        if (worldInj) {
-            var ex4 = scriptModule.chat_metadata.authorsNote3 || "";
-            var cl4 = ex4.replace(new RegExp(mk + "[\\s\\S]*?" + emk, "g"), "").trim();
-            scriptModule.chat_metadata.authorsNote3 = cl4 + (cl4 ? "\n" : "") + mk + "\n" + worldInj + "\n" + emk;
-            scriptModule.chat_metadata.authorsNoteDepth3 = 4;
-        }
-
+        var cl = ex.replace(new RegExp(mk + "[\\s\\S]*?" + emk, "g"), "").trim();
+        scriptModule.chat_metadata.authorsNote = cl + (cl ? "\n" : "") + mk + "\n" + finalInj + "\n" + emk;
     } catch(e) { console.error("[Story Tracker] Inject error:", e); }
 }
 
@@ -1054,34 +1072,48 @@ function bindEvents() {
         relMsgCounter++;
         saveStoryData();
         
-        if (autoUpdate && msgCounter > 0 && msgCounter % autoUpdateInterval === 0) {
-            busy = true;
-            try {
-                await doLLMUpdate();
-                renderModal(); renderHUD();
-            } catch(e) { console.error(e); }
-            busy = false;
-        } else {
+        // Determine which agents are due this message
+        var sceneUpdateDue = autoUpdate && msgCounter > 0 && msgCounter % autoUpdateInterval === 0;
+        var relInterval = settings.relAutoInterval || 5;
+        var relUpdateDue = settings.relationsEnabled && settings.relationsAutoUpdate &&
+                           relMsgCounter > 0 && relMsgCounter % relInterval === 0;
+
+        if (!sceneUpdateDue) {
+            // Nothing to queue for scene — just refresh the countdown UI
             renderAutoInfo();
         }
 
-        // World tick check runs independently of scene updates.
-        if (settings.worldEnabled) {
-            setTimeout(function() { checkAndRunWorldTicks(); }, 800);
+        // Enqueue agents in priority order: scene → world → relationship.
+        // The queue processes them one at a time with a gap between each,
+        // preventing "concurrent generation" errors on rate-limited APIs.
+
+        if (sceneUpdateDue) {
+            enqueueAgent("scene-tracker", async function () {
+                busy = true;
+                try {
+                    await doLLMUpdate();
+                    renderModal(); renderHUD();
+                } catch (e) { console.error(e); }
+                busy = false;
+            });
         }
 
-        // Relationship tracker: runs on its own message interval, independent of world ticks
-        if (settings.relationsEnabled && settings.relationsAutoUpdate && !relsBusy) {
-            var relInterval = settings.relAutoInterval || 5;
-            if (relMsgCounter > 0 && relMsgCounter % relInterval === 0) {
-                setTimeout(async function() {
-                    try {
-                        await doRelationshipUpdate();
-                        if ($("#st-tab-relations").is(":visible")) renderRelationshipGraph();
-                        if (typeof toastr !== "undefined") toastr.info("Relationships updated.");
-                    } catch(e) { console.error("[Story Tracker] Auto relationship update failed:", e); }
-                }, 600);
-            }
+        if (settings.worldEnabled) {
+            enqueueAgent("world-tick-check", function () {
+                return checkAndRunWorldTicks();
+            });
+        }
+
+        if (relUpdateDue) {
+            enqueueAgent("relationship-tracker", async function () {
+                relsBusy = true;
+                try {
+                    await doRelationshipUpdate();
+                    if ($("#st-tab-relations").is(":visible")) renderRelationshipGraph();
+                    if (typeof toastr !== "undefined") toastr.info("Relationships updated.");
+                } catch (e) { console.error("[Story Tracker] Auto relationship update failed:", e); }
+                relsBusy = false;
+            });
         }
     };
 
@@ -2247,6 +2279,10 @@ function applyRelationshipDecay() {
 
 async function runManualRelationshipAnalysis() {
     if (relsBusy) return;
+    if (anyBusy() && !relsBusy) {
+        if (typeof toastr !== "undefined") toastr.warning("Another agent is running. Please wait.");
+        return;
+    }
     if (!settings.relationsEnabled) {
         if (typeof toastr !== "undefined") toastr.warning("Relationship Tracker is disabled. Enable it in settings first.");
         return;
@@ -3010,8 +3046,8 @@ function toggleChatButtonVisibility() {
 }
 
 // --- Check and Run World Ticks ---
-function checkAndRunWorldTicks() {
-    if (!settings.worldEnabled || worldBusy || !worldData || !storyData || !storyData._initialized) return;
+async function checkAndRunWorldTicks() {
+    if (!settings.worldEnabled || !worldData || !storyData || !storyData._initialized) return;
 
     var curTime = storyData.time;
     var curDate = storyData.date;
@@ -3041,48 +3077,47 @@ function checkAndRunWorldTicks() {
     var thresholdHours = 1;
     if (settings.worldTickFrequency === "3h") thresholdHours = 3;
     else if (settings.worldTickFrequency === "1d") thresholdHours = 24;
-    else if (settings.worldTickFrequency === "manual") return; 
+    else if (settings.worldTickFrequency === "manual") return;
 
     if (diffHours >= thresholdHours) {
         var ticksToRun = Math.floor(diffHours / thresholdHours);
         if (ticksToRun > settings.maxWorldTicks) {
-            ticksToRun = settings.maxWorldTicks; 
+            ticksToRun = settings.maxWorldTicks;
         }
 
         console.log(`[Story Tracker] Time progression detected (${diffHours.toFixed(2)}h). Running ${ticksToRun} World Agent tick(s).`);
 
-        (async function() {
-            worldBusy = true;
-            try {
-                for (var i = 0; i < ticksToRun; i++) {
-                    // Back-calculate tick timestamps to step chronologically
-                    var tickTimeOffsetMs = (i + 1) * thresholdHours * 60 * 60 * 1000;
-                    var tickDateObj = new Date(lastDateObj.getTime() + tickTimeOffsetMs);
-                    
-                    var tickTimeStr = padZero(tickDateObj.getHours()) + ":" + padZero(tickDateObj.getMinutes());
-                    var tickDateStr = padZero(tickDateObj.getDate()) + "/" + padZero(tickDateObj.getMonth() + 1) + "/" + tickDateObj.getFullYear();
+        worldBusy = true;
+        try {
+            for (var i = 0; i < ticksToRun; i++) {
+                // Back-calculate tick timestamps to step chronologically
+                var tickTimeOffsetMs = (i + 1) * thresholdHours * 60 * 60 * 1000;
+                var tickDateObj = new Date(lastDateObj.getTime() + tickTimeOffsetMs);
 
-                    await runSingleWorldTick(tickTimeStr, tickDateStr);
-                }
-                renderModal(); renderHUD();
-                if (typeof toastr !== "undefined") toastr.info(`World simulated: ${ticksToRun} tick(s) processed.`);
+                var tickTimeStr = padZero(tickDateObj.getHours()) + ":" + padZero(tickDateObj.getMinutes());
+                var tickDateStr = padZero(tickDateObj.getDate()) + "/" + padZero(tickDateObj.getMonth() + 1) + "/" + tickDateObj.getFullYear();
 
-                // Auto-trigger relationship analysis after world tick if enabled
-                if (settings.relationsEnabled && settings.relationsAutoUpdate) {
-                    setTimeout(async function() {
-                        try {
-                            await doRelationshipUpdate();
-                            if ($("#st-tab-relations").is(":visible")) renderRelationshipGraph();
-                        } catch(e) {
-                            console.error("[Story Tracker] Post-tick relationship update failed:", e);
-                        }
-                    }, 400);
-                }
-            } catch(e) {
-                console.error("[Story Tracker] World tick evaluation crashed:", e);
-            } finally {
-                worldBusy = false;
+                await runSingleWorldTick(tickTimeStr, tickDateStr);
             }
-        })();
+            renderModal(); renderHUD();
+            if (typeof toastr !== "undefined") toastr.info(`World simulated: ${ticksToRun} tick(s) processed.`);
+
+            // Post-tick relationship update — enqueued (not setTimeout) so it waits for any
+            // other queued agents to finish and respects the inter-task gap.
+            if (settings.relationsEnabled && settings.relationsAutoUpdate) {
+                enqueueAgent("post-tick-relationship", async function () {
+                    try {
+                        await doRelationshipUpdate();
+                        if ($("#st-tab-relations").is(":visible")) renderRelationshipGraph();
+                    } catch (e) {
+                        console.error("[Story Tracker] Post-tick relationship update failed:", e);
+                    }
+                });
+            }
+        } catch (e) {
+            console.error("[Story Tracker] World tick evaluation crashed:", e);
+        } finally {
+            worldBusy = false;
+        }
     }
 }
