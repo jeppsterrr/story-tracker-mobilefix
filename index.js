@@ -2546,12 +2546,14 @@ function renderRelationshipGraph() {
 
 // --- HUD ---
 function setHudStatus(label) {
-    var $s = $("#st-hud-status");
-    $s.html('<i class="fa-solid fa-spinner fa-spin"></i> ' + label).show();
+    // Swap book icon for spinner; hide text label (looks clean in both collapsed and expanded states)
+    $("#st-hud .fa-book-open-reader").removeClass("fa-book-open-reader").addClass("fa-spinner fa-spin st-hud-was-book");
+    $("#st-hud-status").hide(); // text label hidden always - spinner icon is enough
     $("#st-hud").addClass("st-hud-busy");
 }
 
 function clearHudStatus() {
+    $("#st-hud .fa-spinner.st-hud-was-book").removeClass("fa-spinner fa-spin st-hud-was-book").addClass("fa-book-open-reader");
     $("#st-hud-status").hide().html("");
     $("#st-hud").removeClass("st-hud-busy");
 }
