@@ -191,38 +191,6 @@ var relMsgCounter = 0;  // counts messages since last relationship checkpoint
 // Prevents concurrent API requests when multiple agents fire at once.
 function anyBusy() { return busy || worldBusy || relsBusy; }
 
-// --- Agent Queue ---
-// Serialises all agent API calls so rate-limited backends (e.g. KoboldAI / APIs that only
-// allow one concurrent generation) never receive two requests at the same time.
-// Every automatic agent trigger goes through enqueueAgent() instead of firing directly.
-var agentQueue = [];
-var agentQueueRunning = false;
-var QUEUE_GAP_MS = 1200; // minimum ms to wait between consecutive agent tasks
-
-function enqueueAgent(label, taskFn) {
-    agentQueue.push({ label: label, task: taskFn });
-    if (!agentQueueRunning) processAgentQueue();
-}
-
-async function processAgentQueue() {
-    if (agentQueueRunning) return;
-    agentQueueRunning = true;
-    while (agentQueue.length > 0) {
-        var entry = agentQueue.shift();
-        console.log("[Story Tracker] Queue → running: " + entry.label);
-        try {
-            await entry.task();
-        } catch (e) {
-            console.error("[Story Tracker] Queue error in '" + entry.label + "':", e);
-        }
-        if (agentQueue.length > 0) {
-            // Brief pause between tasks to respect rate limits
-            await new Promise(function (res) { setTimeout(res, QUEUE_GAP_MS); });
-        }
-    }
-    agentQueueRunning = false;
-}
-
 // --- Init ---
 jQuery(async function () {
     try {
@@ -1072,48 +1040,36 @@ function bindEvents() {
         relMsgCounter++;
         saveStoryData();
         
-        // Determine which agents are due this message
-        var sceneUpdateDue = autoUpdate && msgCounter > 0 && msgCounter % autoUpdateInterval === 0;
-        var relInterval = settings.relAutoInterval || 5;
-        var relUpdateDue = settings.relationsEnabled && settings.relationsAutoUpdate &&
-                           relMsgCounter > 0 && relMsgCounter % relInterval === 0;
+        // Run agents sequentially to avoid concurrent API requests on rate-limited backends.
+        // Each agent awaits the previous one and waits an extra 1.5s gap before firing.
+        var needsSceneUpdate = autoUpdate && msgCounter > 0 && msgCounter % autoUpdateInterval === 0;
+        var needsWorldTick   = settings.worldEnabled;
+        var needsRelUpdate   = settings.relationsEnabled && settings.relationsAutoUpdate && !relsBusy &&
+                               relMsgCounter > 0 && relMsgCounter % (settings.relAutoInterval || 5) === 0;
 
-        if (!sceneUpdateDue) {
-            // Nothing to queue for scene — just refresh the countdown UI
+        if (needsSceneUpdate) {
+            busy = true;
+            try {
+                await doLLMUpdate();
+                renderModal(); renderHUD();
+            } catch(e) { console.error(e); }
+            busy = false;
+        } else {
             renderAutoInfo();
         }
 
-        // Enqueue agents in priority order: scene → world → relationship.
-        // The queue processes them one at a time with a gap between each,
-        // preventing "concurrent generation" errors on rate-limited APIs.
-
-        if (sceneUpdateDue) {
-            enqueueAgent("scene-tracker", async function () {
-                busy = true;
-                try {
-                    await doLLMUpdate();
-                    renderModal(); renderHUD();
-                } catch (e) { console.error(e); }
-                busy = false;
-            });
+        if (needsWorldTick) {
+            await new Promise(function(r) { setTimeout(r, 1500); });
+            await checkAndRunWorldTicks();
         }
 
-        if (settings.worldEnabled) {
-            enqueueAgent("world-tick-check", function () {
-                return checkAndRunWorldTicks();
-            });
-        }
-
-        if (relUpdateDue) {
-            enqueueAgent("relationship-tracker", async function () {
-                relsBusy = true;
-                try {
-                    await doRelationshipUpdate();
-                    if ($("#st-tab-relations").is(":visible")) renderRelationshipGraph();
-                    if (typeof toastr !== "undefined") toastr.info("Relationships updated.");
-                } catch (e) { console.error("[Story Tracker] Auto relationship update failed:", e); }
-                relsBusy = false;
-            });
+        if (needsRelUpdate) {
+            await new Promise(function(r) { setTimeout(r, 1500); });
+            try {
+                await doRelationshipUpdate();
+                if ($("#st-tab-relations").is(":visible")) renderRelationshipGraph();
+                if (typeof toastr !== "undefined") toastr.info("Relationships updated.");
+            } catch(e) { console.error("[Story Tracker] Auto relationship update failed:", e); }
         }
     };
 
@@ -1628,8 +1584,7 @@ async function doLLMUpdate() {
     // First run: last 20 messages. Subsequent runs: only messages since last scene checkpoint.
     // Each message is truncated to 500 chars to prevent long AI responses from bloating the prompt.
     var liveChat = getLiveChat() || [];
-    var userName = (scriptModule && scriptModule.name1) ? scriptModule.name1 : "User";
-    var MSG_TRUNCATE = 500;
+    var userName = (scriptModule && scriptModule.name1) ? scriptModule.name1 : "{{user}}";
     var sceneLastCheckpoint = -1;
     if (storyData._sceneCheckpointIdx != null) {
         var scpIdx = storyData._sceneCheckpointIdx;
@@ -1650,7 +1605,6 @@ async function doLLMUpdate() {
     sceneMsgs.forEach(function(msg) {
         var senderName = msg.is_user ? userName : (msg.name || "Character");
         var text = (msg.mes || "").trim();
-        if (text.length > MSG_TRUNCATE) text = text.slice(0, MSG_TRUNCATE) + "...";
         if (text) chatContext += senderName + ": " + text + "\n\n";
     });
     chatContext = chatContext.trim() || "No messages yet.";
@@ -1838,7 +1792,6 @@ async function runSingleWorldTick(timeStr, dateStr) {
     // First tick: last 15 messages. Subsequent ticks: only messages since last world checkpoint.
     // Each message is truncated to 500 chars to prevent long responses from bloating the prompt.
     var originalChat = (scriptModule && scriptModule.chat) ? scriptModule.chat : [];
-    var WORLD_MSG_TRUNCATE = 500;
     var worldLastCheckpoint = -1;
     if (worldData._worldCheckpointIdx != null) {
         var wcpIdx = worldData._worldCheckpointIdx;
@@ -1857,9 +1810,8 @@ async function runSingleWorldTick(timeStr, dateStr) {
     if (worldMsgs.length < 3) worldMsgs = originalChat.slice(-3);
     var chatHistoryText = "";
     worldMsgs.forEach(function(msg) {
-        var senderName = msg.is_user ? "User" : (msg.name || "Char");
+        var senderName = msg.is_user ? (scriptModule && scriptModule.name1 ? scriptModule.name1 : "{{user}}") : (msg.name || "Char");
         var msgText = (msg.mes || "").trim();
-        if (msgText.length > WORLD_MSG_TRUNCATE) msgText = msgText.slice(0, WORLD_MSG_TRUNCATE) + "...";
         chatHistoryText += senderName + ": " + msgText + "\n";
     });
     if (!chatHistoryText.trim()) chatHistoryText = "No recent messages.";
@@ -2091,7 +2043,7 @@ async function doRelationshipUpdate() {
     // On first run (no checkpoint) grab the last 20 messages.
     // On subsequent runs grab only messages since the last checkpoint message index.
     var liveChat = getLiveChat() || [];
-    var userName = (scriptModule && scriptModule.name1) ? scriptModule.name1 : "User";
+    var userName = (scriptModule && scriptModule.name1) ? scriptModule.name1 : "{{user}}";
     // Validate checkpoint anchor to detect index drift from deletions/swipes
     var lastCheckpoint = -1;
     if (relationshipData && relationshipData._checkpointMsgIdx != null) {
@@ -2111,12 +2063,10 @@ async function doRelationshipUpdate() {
         : liveChat.slice(-20);
     // Always include at least 3 messages for context even if interval fires early
     if (relevantMsgs.length < 3) relevantMsgs = liveChat.slice(-3);
-    var REL_MSG_TRUNCATE = 500;
     var chatText = "";
     relevantMsgs.forEach(function(msg) {
         var sender = msg.is_user ? userName : (msg.name || "Character");
         var text = (msg.mes || "").trim();
-        if (text.length > REL_MSG_TRUNCATE) text = text.slice(0, REL_MSG_TRUNCATE) + "...";
         if (text) chatText += sender + ": " + text + "\n\n";
     });
     chatText = chatText.trim() || "No recent messages.";
@@ -3046,8 +2996,8 @@ function toggleChatButtonVisibility() {
 }
 
 // --- Check and Run World Ticks ---
-async function checkAndRunWorldTicks() {
-    if (!settings.worldEnabled || !worldData || !storyData || !storyData._initialized) return;
+function checkAndRunWorldTicks() {
+    if (!settings.worldEnabled || anyBusy() || !worldData || !storyData || !storyData._initialized) return;
 
     var curTime = storyData.time;
     var curDate = storyData.date;
@@ -3077,47 +3027,48 @@ async function checkAndRunWorldTicks() {
     var thresholdHours = 1;
     if (settings.worldTickFrequency === "3h") thresholdHours = 3;
     else if (settings.worldTickFrequency === "1d") thresholdHours = 24;
-    else if (settings.worldTickFrequency === "manual") return;
+    else if (settings.worldTickFrequency === "manual") return; 
 
     if (diffHours >= thresholdHours) {
         var ticksToRun = Math.floor(diffHours / thresholdHours);
         if (ticksToRun > settings.maxWorldTicks) {
-            ticksToRun = settings.maxWorldTicks;
+            ticksToRun = settings.maxWorldTicks; 
         }
 
         console.log(`[Story Tracker] Time progression detected (${diffHours.toFixed(2)}h). Running ${ticksToRun} World Agent tick(s).`);
 
-        worldBusy = true;
-        try {
-            for (var i = 0; i < ticksToRun; i++) {
-                // Back-calculate tick timestamps to step chronologically
-                var tickTimeOffsetMs = (i + 1) * thresholdHours * 60 * 60 * 1000;
-                var tickDateObj = new Date(lastDateObj.getTime() + tickTimeOffsetMs);
+        (async function() {
+            worldBusy = true;
+            try {
+                for (var i = 0; i < ticksToRun; i++) {
+                    // Back-calculate tick timestamps to step chronologically
+                    var tickTimeOffsetMs = (i + 1) * thresholdHours * 60 * 60 * 1000;
+                    var tickDateObj = new Date(lastDateObj.getTime() + tickTimeOffsetMs);
+                    
+                    var tickTimeStr = padZero(tickDateObj.getHours()) + ":" + padZero(tickDateObj.getMinutes());
+                    var tickDateStr = padZero(tickDateObj.getDate()) + "/" + padZero(tickDateObj.getMonth() + 1) + "/" + tickDateObj.getFullYear();
 
-                var tickTimeStr = padZero(tickDateObj.getHours()) + ":" + padZero(tickDateObj.getMinutes());
-                var tickDateStr = padZero(tickDateObj.getDate()) + "/" + padZero(tickDateObj.getMonth() + 1) + "/" + tickDateObj.getFullYear();
+                    await runSingleWorldTick(tickTimeStr, tickDateStr);
+                }
+                renderModal(); renderHUD();
+                if (typeof toastr !== "undefined") toastr.info(`World simulated: ${ticksToRun} tick(s) processed.`);
 
-                await runSingleWorldTick(tickTimeStr, tickDateStr);
+                // Auto-trigger relationship analysis after world tick if enabled
+                if (settings.relationsEnabled && settings.relationsAutoUpdate) {
+                    setTimeout(async function() {
+                        try {
+                            await doRelationshipUpdate();
+                            if ($("#st-tab-relations").is(":visible")) renderRelationshipGraph();
+                        } catch(e) {
+                            console.error("[Story Tracker] Post-tick relationship update failed:", e);
+                        }
+                    }, 400);
+                }
+            } catch(e) {
+                console.error("[Story Tracker] World tick evaluation crashed:", e);
+            } finally {
+                worldBusy = false;
             }
-            renderModal(); renderHUD();
-            if (typeof toastr !== "undefined") toastr.info(`World simulated: ${ticksToRun} tick(s) processed.`);
-
-            // Post-tick relationship update — enqueued (not setTimeout) so it waits for any
-            // other queued agents to finish and respects the inter-task gap.
-            if (settings.relationsEnabled && settings.relationsAutoUpdate) {
-                enqueueAgent("post-tick-relationship", async function () {
-                    try {
-                        await doRelationshipUpdate();
-                        if ($("#st-tab-relations").is(":visible")) renderRelationshipGraph();
-                    } catch (e) {
-                        console.error("[Story Tracker] Post-tick relationship update failed:", e);
-                    }
-                });
-            }
-        } catch (e) {
-            console.error("[Story Tracker] World tick evaluation crashed:", e);
-        } finally {
-            worldBusy = false;
-        }
+        })();
     }
 }
