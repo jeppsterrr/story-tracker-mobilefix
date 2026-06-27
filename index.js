@@ -158,12 +158,16 @@ var settings = {
     accentG: 160,
     accentB: 64,
 
+    // Agent Timing — delay (ms) between sequential agent calls after a message.
+    // Increase to 3000–5000 on slow/local backends (Termux, low-VRAM local models).
+    agentDelay: 1500,
+
     // World Agent Settings
     worldEnabled: false,
     useWorldProfile: false,
     worldConnectionProfile: "",
     worldTickFrequency: "1h", // "1h", "3h", "1d", "manual"
-    maxWorldTicks: 6,
+    maxWorldTicks: 3,
     injectWorldContext: false,
 
     // Relationship Tracker Settings
@@ -182,10 +186,13 @@ var worldData = null;
 var relationshipData = null;
 var msgCounter = 0;
 var lastCountedMsgId = -1; // highest chat message ID counted so far (drives the "no swipes/regens/dupes" filter)
-var busy = false;       // scene tracker lock
-var worldBusy = false;  // world agent lock
-var relsBusy = false;   // relationship tracker lock
-var relMsgCounter = 0;  // counts messages since last relationship checkpoint
+var busy = false;             // scene tracker lock
+var worldBusy = false;        // world agent lock
+var relsBusy = false;         // relationship tracker lock
+var relMsgCounter = 0;        // counts messages since last relationship checkpoint
+var handleMsgRunning = false; // top-level guard: drops overlapping handleMsg calls caused by
+                              // ST firing both CHARACTER_MESSAGE_RENDERED and MESSAGE_RECEIVED
+                              // for the same message, preventing double world/rel agent runs.
 
 // Global lock - returns true if ANY agent is currently generating.
 // Prevents concurrent API requests when multiple agents fire at once.
@@ -1021,55 +1028,68 @@ function bindEvents() {
         lastCountedMsgId = id;
         saveStoryData();
 
-        if (!settings.enabled) {
-            if (typeof toastr !== "undefined") toastr.warning("Story Tracker is disabled. Enable it in the extension settings.");
-            return;
-        }
+        if (!settings.enabled) return;
 
-        if (busy) return;
+        // TOP-LEVEL GUARD: SillyTavern fires both CHARACTER_MESSAGE_RENDERED and MESSAGE_RECEIVED
+        // for the same message. Without this, the second event enters handleMsg while the first is
+        // still awaiting an agent, causing duplicate world ticks and relationship runs (the ghost
+        // double-call bug). If any agent chain is already running, drop this call entirely.
+        if (handleMsgRunning || anyBusy()) return;
 
         if (!isChatOpen()) {
             console.warn("[Story Tracker] Event ignored: No active chat is open.");
             return;
         }
 
-        let autoUpdate = (storyData && storyData.autoUpdate !== undefined) ? storyData.autoUpdate : settings.autoUpdate;
-        let autoUpdateInterval = (storyData && storyData.autoUpdateInterval !== undefined) ? storyData.autoUpdateInterval : settings.autoUpdateInterval;
+        handleMsgRunning = true;
+        try {
+            let autoUpdate = (storyData && storyData.autoUpdate !== undefined) ? storyData.autoUpdate : settings.autoUpdate;
+            let autoUpdateInterval = (storyData && storyData.autoUpdateInterval !== undefined) ? storyData.autoUpdateInterval : settings.autoUpdateInterval;
 
-        msgCounter++;
-        relMsgCounter++;
-        saveStoryData();
-        
-        // Run agents sequentially to avoid concurrent API requests on rate-limited backends.
-        // Each agent awaits the previous one and waits an extra 1.5s gap before firing.
-        var needsSceneUpdate = autoUpdate && msgCounter > 0 && msgCounter % autoUpdateInterval === 0;
-        var needsWorldTick   = settings.enabled && settings.worldEnabled;
-        var needsRelUpdate   = settings.relationsEnabled && settings.relationsAutoUpdate && !relsBusy &&
-                               relMsgCounter > 0 && relMsgCounter % (settings.relAutoInterval || 5) === 0;
+            msgCounter++;
+            relMsgCounter++;
+            saveStoryData();
 
-        if (needsSceneUpdate) {
-            busy = true;
-            try {
-                await doLLMUpdate();
-                renderModal(); renderHUD();
-            } catch(e) { console.error(e); }
-            busy = false;
-        } else {
-            renderAutoInfo();
-        }
+            // Configurable delay between sequential agent calls.
+            // Users on slow/local backends (Termux, low-VRAM) can raise this in settings.
+            var delay = (settings.agentDelay != null && settings.agentDelay >= 0) ? settings.agentDelay : 1500;
 
-        if (needsWorldTick) {
-            await new Promise(function(r) { setTimeout(r, 1500); });
-            await checkAndRunWorldTicks();
-        }
+            // Run agents sequentially to avoid concurrent API requests on rate-limited backends.
+            // Each agent awaits the previous one before firing.
+            var needsSceneUpdate = autoUpdate && msgCounter > 0 && msgCounter % autoUpdateInterval === 0;
+            var needsWorldTick   = settings.enabled && settings.worldEnabled;
+            var needsRelUpdate   = settings.relationsEnabled && settings.relationsAutoUpdate &&
+                                   relMsgCounter > 0 && relMsgCounter % (settings.relAutoInterval || 5) === 0;
 
-        if (needsRelUpdate) {
-            await new Promise(function(r) { setTimeout(r, 1500); });
-            try {
-                await doRelationshipUpdate();
-                if ($("#st-tab-relations").is(":visible")) renderRelationshipGraph();
-                if (typeof toastr !== "undefined") toastr.info("Relationships updated.");
-            } catch(e) { console.error("[Story Tracker] Auto relationship update failed:", e); }
+            if (needsSceneUpdate) {
+                busy = true;
+                try {
+                    await doLLMUpdate();
+                    renderModal(); renderHUD();
+                } catch(e) { console.error("[Story Tracker] Scene update failed:", e); }
+                busy = false;
+            } else {
+                renderAutoInfo();
+            }
+
+            if (needsWorldTick) {
+                await new Promise(function(r) { setTimeout(r, delay); });
+                await checkAndRunWorldTicks();
+            }
+
+            if (needsRelUpdate) {
+                await new Promise(function(r) { setTimeout(r, delay); });
+                relsBusy = true;
+                try {
+                    await doRelationshipUpdate();
+                    if ($("#st-tab-relations").is(":visible")) renderRelationshipGraph();
+                    renderHUD();
+                    if (typeof toastr !== "undefined") toastr.info("Relationships updated.");
+                } catch(e) { console.error("[Story Tracker] Auto relationship update failed:", e); }
+                finally { relsBusy = false; }
+            }
+        } finally {
+            handleMsgRunning = false;
         }
     };
 
@@ -1538,6 +1558,8 @@ function updateSettingsUI() {
     $("#st-s-world-freq").val(settings.worldTickFrequency);
     $("#st-s-max-ticks").val(settings.maxWorldTicks);
     $("#st-max-ticks-val").text(settings.maxWorldTicks);
+    $("#st-s-agent-delay").val(settings.agentDelay != null ? settings.agentDelay : 1500);
+    $("#st-agent-delay-val").text((settings.agentDelay != null ? settings.agentDelay : 1500) + "ms");
 
     // Sync Relationship Tracker settings
     $("#st-s-rel-on").prop("checked", settings.relationsEnabled);
@@ -2829,6 +2851,12 @@ function buildSettingsPanel() {
     h += '<div class="da-srow" id="st-max-ticks-row"><label><small>Maximum Tick Catchup: <span id="st-max-ticks-val"></span></small></label>' +
          '<input type="range" id="st-s-max-ticks" min="1" max="24" step="1"></div>';
 
+    // Agent Delay setting — controls the pause between sequential agent calls.
+    // Users on slow/local backends (Termux, low-VRAM models) should raise this.
+    h += '<div class="da-srow"><label><small>Agent Delay between calls: <span id="st-agent-delay-val"></span></small></label>' +
+         '<input type="range" id="st-s-agent-delay" min="500" max="10000" step="500"></div>';
+    h += '<div class="da-srow"><small style="opacity:.65;">&#x26A1; Raise to 3000–5000 ms if using a slow local model (Termux / low-VRAM). Default 1500 ms is fine for most APIs.</small></div>';
+
     // Relationship Tracker Settings
     h += '<hr><div class="da-srow"><b>Relationship Tracker</b></div>';
     h += '<div class="da-srow"><small style="opacity:.7">Tracks character bonds and how they evolve. Runs on its own message interval using checkpoints \u2014 only new messages since the last analysis are sent each time.</small></div>';
@@ -2958,6 +2986,14 @@ function buildSettingsPanel() {
         save();
     });
     $("#st-max-ticks-val").text(settings.maxWorldTicks);
+
+    // Agent Delay binding
+    $("#st-s-agent-delay").val(settings.agentDelay != null ? settings.agentDelay : 1500).on("input", function() {
+        settings.agentDelay = parseInt(this.value, 10);
+        $("#st-agent-delay-val").text(this.value + "ms");
+        save();
+    });
+    $("#st-agent-delay-val").text((settings.agentDelay != null ? settings.agentDelay : 1500) + "ms");
 
     // Relationship Tracker Settings Element Bindings
     $("#st-s-rel-on").prop("checked", settings.relationsEnabled).on("change", function() {
