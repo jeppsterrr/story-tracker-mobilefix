@@ -2931,7 +2931,7 @@ function buildSettingsPanel() {
 
     // World Agent Settings Element Bindings
     $("#st-s-world-on").prop("checked", settings.worldEnabled).on("change", function() {
-        settings.worldEnabled = this.checked; save();
+        settings.worldEnabled = this.checked; save(); renderHUD(); renderModal();
     });
     $("#st-s-world-inject").prop("checked", settings.injectWorldContext).on("change", function() {
         settings.injectWorldContext = this.checked; save();
@@ -2961,7 +2961,7 @@ function buildSettingsPanel() {
 
     // Relationship Tracker Settings Element Bindings
     $("#st-s-rel-on").prop("checked", settings.relationsEnabled).on("change", function() {
-        settings.relationsEnabled = this.checked; save();
+        settings.relationsEnabled = this.checked; save(); renderHUD(); renderModal();
     });
     $("#st-s-rel-auto").prop("checked", settings.relationsAutoUpdate).on("change", function() {
         settings.relationsAutoUpdate = this.checked; save();
