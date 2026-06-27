@@ -361,7 +361,7 @@ function makeDefaultData() {
         city: "Unknown", country: "Unknown",
         temperature: "Unknown", weather: "Unknown",
         characters: [], recent_events: "Story just started.",
-        history: [], _initialized: false, _msgCount: 0, _relMsgCount: 0,
+        history: [], _initialized: false, _msgCount: 0, _relMsgCount: 0, _historyCount: 0,
         _lastCountedMsgId: -1, // no chat messages counted yet
         autoUpdate: settings.autoUpdate,
         autoUpdateInterval: settings.autoUpdateInterval
@@ -1673,8 +1673,9 @@ async function doLLMUpdate() {
     storyData._initialized = true;
     if (data.recent_events) {
         if (!storyData.history) storyData.history = [];
+        storyData._historyCount = (storyData._historyCount || 0) + 1;
         storyData.history.unshift({
-            msg:         msgCounter,
+            msg:         storyData._historyCount,
             time:        storyData.time,
             loc:         storyData.location,
             events:      data.recent_events,
@@ -2145,7 +2146,7 @@ async function doRelationshipUpdate() {
             if (!existing.history) existing.history = [];
             if (existing.summary) {
                 existing.history.unshift({
-                    msg: msgCounter,
+                    msg: storyData._historyCount || 0,
                     summary: rel.change || "Updated",
                     strength: strength
                 });
