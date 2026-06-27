@@ -48,11 +48,11 @@ var UPDATE_PROMPT =
     "   - Fantasy / sci-fi / fictional world → INVENT fitting names based on the story tone, character names, culture, architecture, language style. Be creative and specific (e.g. 'Myrenveld' / 'Sovereign Realms of Drak'hara').\n" +
     "   - Known fictional universe (Westeros, Middle-earth, etc.) → use canonical place names.\n" +
     "   - Setting is ambiguous or unspecified → make your BEST GUESS or freely invent. 'Unknown' is NOT an acceptable value under any circumstances.\n" +
-    "3. CHARACTER POSITIONS: List every character present in the current scene (including {{user}} / the user). State exactly where they are and what their physical posture/action is right now (e.g., 'sitting on the bed', 'standing near the window', 'holding a knife').\n" +
-    "4. RECENT EVENTS: Write a brief, factual 1-2 sentence summary of what *just* changed or happened in the last few messages (e.g., 'User picked up a fork. Character 1 moved to the corridor.').\n\n" +
+    "3. CHARACTER POSITIONS: List every character present in the current scene (including {{user}} the player). Use the player's actual name as it appears in the chat - NOT the word 'User'. State exactly where they are and what their physical posture/action is right now.\n" +
+    "4. RECENT EVENTS: Write a brief, factual 1-2 sentence summary of what just changed or happened in the last few messages. Use the player's actual name, not 'User'.\n\n" +
     "{{PREVIOUS_STATE}}\n\n" +
-    "Respond ONLY with valid JSON in the story's language. Use this exact structure (city and country MUST be non-empty strings, never 'Unknown'):\n" +
-    "{\"time\":\"14:30\", \"date\":\"15/06/2024\", \"location\":\"Living room\", \"city\":\"Myrenveld\", \"country\":\"Sovereign Realms of Drak'hara\", \"temperature\":\"18°C\", \"weather\":\"Cloudy\", \"characters\":[{\"name\":\"User\", \"state\":\"sitting on floor\"}, {\"name\":\"Char1\", \"state\":\"standing near User\"}], \"recent_events\":\"Char1 entered the living room and spoke to User.\"}\n" +
+    "Respond ONLY with valid JSON in the story's language. IMPORTANT: In the characters array, use the player's actual name from the chat - never write 'User'. Use this exact structure (city and country MUST be non-empty strings, never 'Unknown'):\n" +
+    "{\"time\":\"14:30\", \"date\":\"15/06/2024\", \"location\":\"Living room\", \"city\":\"Myrenveld\", \"country\":\"Sovereign Realms of Drak'hara\", \"temperature\":\"18°C\", \"weather\":\"Cloudy\", \"characters\":[{\"name\":\"Jepp\", \"state\":\"sitting on floor\"}, {\"name\":\"Char1\", \"state\":\"standing near Jepp\"}], \"recent_events\":\"Char1 entered the living room and spoke to Jepp.\"}\n" +
     "]";
 
 // Fallback prompt — used when city/country is still unknown after main update
@@ -1406,7 +1406,6 @@ function renderModal() {
             storyData.characters.forEach(c => {
                 var stateText = c.state;
                 var isUser = (userName && c.name.toLowerCase() === userName.toLowerCase()) ||
-                             c.name.toLowerCase() === "user" ||
                              c.name.toLowerCase() === "вы" ||
                              c.name === "{{user}}";
 
@@ -1625,7 +1624,8 @@ async function doLLMUpdate() {
 
     var prevState = buildPrevStateText();
     var prompt = UPDATE_PROMPT.replace("{{PREVIOUS_STATE}}", prevState) +
-                 "\n\nRecent chat:\n" + chatContext;
+                 "\n\n[Player character name: {{user}}. Always use this exact name in the JSON output, never write 'User'.]\n" +
+                 "Recent chat:\n" + chatContext;
 
     var raw = await withConnectionProfile(async function() {
         try {
@@ -2745,7 +2745,6 @@ function renderHUD() {
 
             if (hudOutfit && hudOutfit.userEquipped.length > 0) {
                 var isUser = (hudUserName && c.name.toLowerCase() === hudUserName.toLowerCase()) ||
-                             c.name.toLowerCase() === "user" ||
                              c.name.toLowerCase() === "вы" ||
                              c.name === "{{user}}";
                 if (isUser) {
