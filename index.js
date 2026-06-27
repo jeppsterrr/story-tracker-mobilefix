@@ -1312,7 +1312,7 @@ function buildModal() {
         renderModal();
 
         // refresh injected prompt context too
-        injectContextToChat();
+        if (settings.enabled && settings.injectToContext) injectContextToChat();
 
         $(document).trigger("ST_FORCE_RENDER");
 
@@ -1684,6 +1684,10 @@ async function doLLMUpdate() {
 }
 
 async function doManualUpdate() {
+    if (!settings.enabled) {
+        if (typeof toastr !== "undefined") toastr.warning("Story Tracker is disabled. Enable it in the extension settings.");
+        return;
+    }
     if (busy) return;
     
     // Failsafe: abort manual update if no active chat open
