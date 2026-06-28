@@ -170,6 +170,7 @@ var settings = {
     relationsEnabled: false,
     relationsAutoUpdate: true,
     relAutoInterval: 5,
+    startupDelay: 2000,
     useRelProfile: false,
     relConnectionProfile: "",
     _restoreRelProfile: "",
@@ -1023,6 +1024,10 @@ function bindEvents() {
 
         if (!settings.enabled) return;
 
+        // Small startup delay so ST's full pipeline (streaming, post-processors) finishes
+        // before we start our own chain. Especially important on slow devices like Termux.
+        await new Promise(function(r) { setTimeout(r, settings.startupDelay || 2000); });
+
         if (busy) return;
 
         if (!isChatOpen()) {
@@ -1541,6 +1546,13 @@ function updateSettingsUI() {
     $("#st-interval-val").text(autoUpdateInterval);
 
     // Sync World Agent settings
+    $("#st-s-startup-delay").val(settings.startupDelay || 2000).on("input", function() {
+        settings.startupDelay = parseInt(this.value, 10);
+        $("#st-s-delay-val").text(this.value);
+        save();
+    });
+    $("#st-s-delay-val").text(settings.startupDelay || 2000);
+
     $("#st-s-world-on").prop("checked", settings.worldEnabled);
     $("#st-s-world-inject").prop("checked", settings.injectWorldContext);
     $("#st-s-world-useprofile").prop("checked", settings.useWorldProfile);
@@ -2843,6 +2855,11 @@ function buildSettingsPanel() {
     h += '<div class="da-srow" id="st-profile-row"><label><small>Analysis Profile:</small></label>';
     h += '<div style="display:flex;gap:5px;align-items:center;"><select id="st-s-profile" class="text_pole" style="flex:1"></select>';
     h += '<button class="menu_button" id="st-s-profile-refresh" title="Refresh profile list" style="flex:0 0 auto;"><i class="fa-solid fa-rotate"></i></button></div></div>';
+
+    // Post-response delay slider
+    h += '<hr><div class="da-srow"><b>Timing</b></div>';
+    h += '<div class="da-srow"><small style="opacity:.7">Delay before extension starts after a response. Increase on slow devices (e.g. Termux) if you get concurrent request errors.</small></div>';
+    h += '<div class="da-srow"><label><small>Post-response delay: <span id="st-s-delay-val"></span>ms</small></label><input type="range" id="st-s-startup-delay" min="500" max="8000" step="500"></div>';
 
     // World Agent Settings Element Bindings
     h += '<hr><div class="da-srow"><b>World Progression Settings</b></div>';
