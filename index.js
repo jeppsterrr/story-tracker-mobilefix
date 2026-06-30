@@ -451,6 +451,137 @@ function makeDefaultRelationshipData() {
     };
 }
 
+// --- Character name normalization / matching (relationship tracker dedup) ---
+// The LLM doesn't always refer to a character the same way between calls
+// ("Ara Vorn" vs "Lt. Ara Vorn" vs "Lieutenant Ara Vorn"), which used to create
+// duplicate nodes/edges since matching was a raw case-sensitive string compare.
+var NAME_TITLE_PREFIXES = [
+    "lt\\.?\\s*cmdr\\.?", "lt\\.?\\s*col\\.?", "lieutenant\\s*commander", "lieutenant\\s*colonel",
+    "lieutenant", "lt\\.?", "commander", "cmdr\\.?", "captain", "capt\\.?",
+    "colonel", "col\\.?", "major", "maj\\.?", "sergeant", "sgt\\.?",
+    "general", "gen\\.?", "admiral", "adm\\.?", "ensign", "private", "pvt\\.?",
+    "doctor", "dr\\.?", "professor", "prof\\.?", "mister", "mr\\.?", "mrs\\.?", "ms\\.?", "miss",
+    "sir", "lady", "lord", "dame"
+];
+var NAME_TITLE_REGEX = new RegExp("^(" + NAME_TITLE_PREFIXES.join("|") + ")\\.?\\s+", "i");
+
+// Strips rank/title prefixes and normalizes casing/punctuation so the same
+// character resolves to the same key regardless of how a given call phrased it.
+function normalizeNameKey(name) {
+    if (!name) return "";
+    var n = String(name).trim();
+    var prev;
+    do {
+        prev = n;
+        n = n.replace(NAME_TITLE_REGEX, "").trim();
+    } while (n !== prev && n.length > 0);
+    return n.toLowerCase().replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ").trim();
+}
+
+function nameTokens(normName) {
+    return normName ? normName.split(" ").filter(Boolean) : [];
+}
+
+// True if two already-normalized names plausibly refer to the same character:
+// identical, one is fully contained in the other word-for-word (handles a
+// stripped title leaving a shorter form, e.g. "thalos drayne" inside what was
+// "lt cmdr thalos drayne"), or they share 2+ significant name tokens.
+function namesLikelyMatch(normA, normB) {
+    if (!normA || !normB) return false;
+    if (normA === normB) return true;
+
+    var tokensA = nameTokens(normA);
+    var tokensB = nameTokens(normB);
+    if (tokensA.length === 0 || tokensB.length === 0) return false;
+
+    var shorter = tokensA.length <= tokensB.length ? tokensA : tokensB;
+    var longer  = tokensA.length <= tokensB.length ? tokensB : tokensA;
+    var longerStr  = " " + longer.join(" ") + " ";
+    var shorterStr = " " + shorter.join(" ") + " ";
+    if (longerStr.indexOf(shorterStr) !== -1) return true;
+
+    if (tokensA.length >= 2 && tokensB.length >= 2) {
+        var setB = {};
+        tokensB.forEach(function(t) { setB[t] = true; });
+        var shared = tokensA.filter(function(t) { return setB[t]; }).length;
+        if (shared >= 2) return true;
+    }
+    return false;
+}
+
+// Looks up whether `name` matches an already-known relationship node under a
+// different phrasing, and if so returns that node's canonical display name
+// (upgrading it to the longer/more detailed variant). Returns `name` unchanged
+// if no existing node matches, signaling a genuinely new character.
+function resolveCanonicalName(name) {
+    if (!name || !relationshipData) return name;
+    var norm = normalizeNameKey(name);
+    if (!norm) return name;
+
+    var nodes = relationshipData.nodes || [];
+    for (var i = 0; i < nodes.length; i++) {
+        var existingNorm = normalizeNameKey(nodes[i].name);
+        if (namesLikelyMatch(norm, existingNorm)) {
+            if (String(name).length > String(nodes[i].name).length) nodes[i].name = name;
+            return nodes[i].name;
+        }
+    }
+    return name;
+}
+
+// One-time cleanup for save data created before name normalization existed:
+// merges any nodes/edges that refer to the same character under different
+// name variants. Safe to call on every load - it's a no-op once clean.
+function dedupeRelationshipNodes() {
+    if (!relationshipData || !relationshipData.nodes || relationshipData.nodes.length < 2) return;
+
+    var nodes = relationshipData.nodes;
+    var canonicalMap = {};
+    var merged = [];
+
+    nodes.forEach(function(node) {
+        if (!node || !node.name) return;
+        var norm = normalizeNameKey(node.name);
+        var match = merged.find(function(m) { return namesLikelyMatch(norm, normalizeNameKey(m.name)); });
+        if (match) {
+            if (String(node.name).length > String(match.name).length) match.name = node.name;
+            canonicalMap[node.name] = match.name;
+        } else {
+            merged.push({ id: node.name, name: node.name });
+            canonicalMap[node.name] = node.name;
+        }
+    });
+
+    if (merged.length === nodes.length) return; // nothing to merge
+
+    relationshipData.nodes = merged;
+
+    // Re-key edges to canonical names and merge any that now collide
+    var edgeMap = {};
+    (relationshipData.edges || []).forEach(function(e) {
+        if (!e) return;
+        var from = canonicalMap[e.from] || e.from;
+        var to = canonicalMap[e.to] || e.to;
+        if (!from || !to || from === to) return; // collapsed onto the same character
+
+        var keyA = from < to ? from : to;
+        var keyB = from < to ? to : from;
+        var key = keyA + "::" + keyB;
+
+        e.from = keyA;
+        e.to = keyB;
+
+        var existingEdge = edgeMap[key];
+        if (!existingEdge || (e.history || []).length > (existingEdge.history || []).length) {
+            edgeMap[key] = e;
+        }
+    });
+
+    relationshipData.edges = Object.keys(edgeMap).map(function(k) { return edgeMap[k]; });
+    console.log("[Story Tracker] Deduplicated relationship nodes: " + nodes.length + " -> " + merged.length);
+    saveRelationshipData();
+}
+
 function loadStoryData() {
     if (!isChatOpen()) {
         storyData = null;
@@ -509,6 +640,7 @@ function loadRelationshipData() {
         relationshipData = stored;
         if (!relationshipData.nodes) relationshipData.nodes = [];
         if (!relationshipData.edges) relationshipData.edges = [];
+        dedupeRelationshipNodes();
     } else {
         relationshipData = makeDefaultRelationshipData();
         if (meta) meta[RELATIONSHIP_KEY] = relationshipData;
@@ -714,6 +846,15 @@ function getCurrentProfileName() {
     } catch (e) { return ""; }
 }
 
+// Confirms a profile name actually exists before we try to switch to it.
+// Switching to a name ConnectionManager doesn't recognize sends a slash
+// command that fails to resolve a target element/profile, which can leave
+// the active connection in a broken state for the generation call that follows.
+function profileExists(name) {
+    if (!name) return false;
+    return getProfileList().some(function (p) { return p.name === name; });
+}
+
 function shouldSwitchProfile() {
     if (!settings.useConnectionProfile) return false;
     if (!runSlash) return false;                       
@@ -727,6 +868,10 @@ function shouldSwitchProfile() {
 
 async function switchProfile(name) {
     if (!runSlash || !name) return false;
+    if (!profileExists(name)) {
+        console.warn("[Story Tracker] Connection profile '" + name + "' was not found in the profile list; skipping switch and using the currently active profile instead.");
+        return false;
+    }
     try {
         await runSlash('/profile "' + String(name).replace(/"/g, '\\"') + '"');
         await new Promise(function (r) { setTimeout(r, 150); });
@@ -1755,6 +1900,7 @@ async function doLLMUpdate() {
         try {
             return await genRaw({ prompt: prompt, quietToLoud: true });
         } catch(e) {
+            console.warn("[Story Tracker] genRaw object-form call failed, falling back to legacy call signature:", e);
             return await genRaw(prompt, null, false, true);
         }
     });
@@ -1781,7 +1927,7 @@ async function doLLMUpdate() {
             var ccPrompt = CITY_COUNTRY_PROMPT.replace("{{LOCATION}}", storyData.location || "Unknown");
             var ccRaw = await withConnectionProfile(async function() {
                 try { return await genRaw({ prompt: ccPrompt, quietToLoud: true }); }
-                catch(e) { return await genRaw(ccPrompt, null, false, true); }
+                catch(e) { console.warn("[Story Tracker] genRaw object-form call failed, falling back to legacy call signature:", e); return await genRaw(ccPrompt, null, false, true); }
             });
             var ccData = cleanAndParseJSON(ccRaw);
             if (ccData) {
@@ -2014,6 +2160,7 @@ async function runSingleWorldTick(timeStr, dateStr) {
                 quietToLoud: true
             });
         } catch (e) {
+            console.warn("[Story Tracker] genRaw object-form call failed, falling back to legacy call signature:", e);
             return await genRaw(prompt, null, false, true);
         }
     });
@@ -2196,6 +2343,7 @@ async function runBatchWorldTick(intervalList, startTimeStr, startDateStr, endTi
         try {
             return await genRaw({ prompt: prompt, quietToLoud: true });
         } catch (e) {
+            console.warn("[Story Tracker] genRaw object-form call failed, falling back to legacy call signature:", e);
             return await genRaw(prompt, null, false, true);
         }
     });
@@ -2411,7 +2559,7 @@ async function doRelationshipUpdate() {
     console.log("[Story Tracker] Running relationship analysis...");
     var raw = await withRelConnectionProfile(async function() {
         try { return await genRaw({ prompt: prompt, quietToLoud: true }); }
-        catch(e) { return await genRaw(prompt, null, false, true); }
+        catch(e) { console.warn("[Story Tracker] genRaw object-form call failed, falling back to legacy call signature:", e); return await genRaw(prompt, null, false, true); }
     });
 
     var data = cleanAndParseJSON(raw);
@@ -2424,6 +2572,13 @@ async function doRelationshipUpdate() {
     data.relationships.forEach(function(rel) {
         if (!rel.from || !rel.to || rel.from === rel.to) return;
 
+        // Resolve each name against existing nodes first, so a differently-phrased
+        // mention of a known character ("Lt. Ara Vorn") reuses that character's
+        // existing node/edges instead of spawning a duplicate.
+        rel.from = resolveCanonicalName(rel.from);
+        rel.to = resolveCanonicalName(rel.to);
+        if (rel.from === rel.to) return; // collapsed onto the same character after resolution
+
         var strength = parseFloat(rel.strength);
         if (isNaN(strength)) strength = 0;
         strength = Math.max(-1, Math.min(1, strength));
@@ -2432,7 +2587,8 @@ async function doRelationshipUpdate() {
         var keyA = rel.from < rel.to ? rel.from : rel.to;
         var keyB = rel.from < rel.to ? rel.to : rel.from;
 
-        // Ensure both character nodes exist
+        // Ensure both character nodes exist (already-resolved names match
+        // existing nodes exactly, so this only adds genuinely new characters)
         [rel.from, rel.to].forEach(function(name) {
             if (!relationshipData.nodes.find(function(n) { return n.name === name; })) {
                 relationshipData.nodes.push({ id: name, name: name });
@@ -2474,8 +2630,10 @@ async function doRelationshipUpdate() {
     // Ensure all current scene characters have a node entry
     if (storyData.characters) {
         storyData.characters.forEach(function(c) {
-            if (!relationshipData.nodes.find(function(n) { return n.name === c.name; })) {
-                relationshipData.nodes.push({ id: c.name, name: c.name });
+            if (!c || !c.name) return;
+            var canonical = resolveCanonicalName(c.name);
+            if (!relationshipData.nodes.find(function(n) { return n.name === canonical; })) {
+                relationshipData.nodes.push({ id: canonical, name: canonical });
             }
         });
     }
