@@ -1305,11 +1305,11 @@ function bindEvents() {
 
         if (needsWorldTick) {
             await new Promise(function(r) { setTimeout(r, 1500); });
-            setHudStatus("World...");
-            if (typeof toastr !== "undefined") toastr.info("Story Tracker: Running world tick...", "", { timeOut: 0, extendedTimeOut: 0 });
+            // checkAndRunWorldTicks() now owns its own HUD/toast feedback internally, and only
+            // shows it when a tick is actually about to run (see function below). This avoids
+            // a misleading flash-then-clear on every message when no time has actually passed
+            // in-RP yet (e.g. the Scene Tracker hasn't extracted an updated date this turn).
             await checkAndRunWorldTicks();
-            clearHudStatus();
-            if (typeof toastr !== "undefined") toastr.clear();
         }
 
         if (needsRelUpdate) {
@@ -3585,7 +3585,7 @@ function toggleChatButtonVisibility() {
 }
 
 // --- Check and Run World Ticks ---
-function checkAndRunWorldTicks() {
+async function checkAndRunWorldTicks() {
     if (!settings.worldEnabled || anyBusy() || !worldData || !storyData || !storyData._initialized) return;
 
     var curTime = storyData.time;
@@ -3618,48 +3618,57 @@ function checkAndRunWorldTicks() {
     else if (settings.worldTickFrequency === "1d") thresholdHours = 24;
     else if (settings.worldTickFrequency === "manual") return; 
 
-    if (diffHours >= thresholdHours) {
-        var ticksToRun = Math.floor(diffHours / thresholdHours);
-        if (ticksToRun > settings.maxWorldTicks) {
-            ticksToRun = settings.maxWorldTicks; 
-        }
+    if (diffHours < thresholdHours) return;
 
-        console.log(`[Story Tracker] Time progression detected (${diffHours.toFixed(2)}h). Running ${ticksToRun} World Agent tick(s).`);
+    var ticksToRun = Math.floor(diffHours / thresholdHours);
+    if (ticksToRun > settings.maxWorldTicks) {
+        ticksToRun = settings.maxWorldTicks; 
+    }
 
-        (async function() {
-            worldBusy = true;
-            try {
-                if (ticksToRun === 1) {
-                    // Single tick - use the standard one-call-per-tick path
-                    var tickTimeOffsetMs = thresholdHours * 60 * 60 * 1000;
-                    var tickDateObj = new Date(lastDateObj.getTime() + tickTimeOffsetMs);
-                    var tickTimeStr = padZero(tickDateObj.getHours()) + ":" + padZero(tickDateObj.getMinutes());
-                    var tickDateStr = padZero(tickDateObj.getDate()) + "/" + padZero(tickDateObj.getMonth() + 1) + "/" + tickDateObj.getFullYear();
-                    await runSingleWorldTick(tickTimeStr, tickDateStr);
-                } else {
-                    // Multiple ticks needed (catchup) - batch them into ONE LLM call instead of
-                    // calling runSingleWorldTick repeatedly. Saves cost/time while still asking
-                    // for one event per interval so the world progresses logically, not vaguely.
-                    var intervalList = [];
-                    for (var i = 0; i < ticksToRun; i++) {
-                        var ivOffsetMs = (i + 1) * thresholdHours * 60 * 60 * 1000;
-                        var ivDateObj = new Date(lastDateObj.getTime() + ivOffsetMs);
-                        intervalList.push({
-                            time: padZero(ivDateObj.getHours()) + ":" + padZero(ivDateObj.getMinutes()),
-                            date: padZero(ivDateObj.getDate()) + "/" + padZero(ivDateObj.getMonth() + 1) + "/" + ivDateObj.getFullYear()
-                        });
-                    }
-                    var lastInterval = intervalList[intervalList.length - 1];
-                    await runBatchWorldTick(intervalList, lastTime, lastDate, lastInterval.time, lastInterval.date);
-                }
-                renderModal(); renderHUD();
-                if (typeof toastr !== "undefined") toastr.info(`World simulated: ${ticksToRun} tick(s) processed.`);
+    console.log(`[Story Tracker] Time progression detected (${diffHours.toFixed(2)}h). Running ${ticksToRun} World Agent tick(s).`);
 
-            } catch(e) {
-                console.error("[Story Tracker] World tick evaluation crashed:", e);
-            } finally {
-                worldBusy = false;
+    // Set the busy lock synchronously, BEFORE any await below, so a rapid second call to this
+    // function (e.g. the next chat message arriving while this tick is still in flight) can't
+    // slip past the anyBusy() guard at the top while a tick is genuinely running.
+    worldBusy = true;
+    // Feedback lives here, not in the caller, so it only ever appears when a tick is actually
+    // about to run — not on every message check, most of which are no-ops (no time has passed
+    // in-RP yet, e.g. the Scene Tracker hasn't extracted an updated date this turn).
+    setHudStatus("World...");
+    if (typeof toastr !== "undefined") toastr.info("Story Tracker: Running world tick...", "", { timeOut: 0, extendedTimeOut: 0 });
+    try {
+        if (ticksToRun === 1) {
+            // Single tick - use the standard one-call-per-tick path
+            var tickTimeOffsetMs = thresholdHours * 60 * 60 * 1000;
+            var tickDateObj = new Date(lastDateObj.getTime() + tickTimeOffsetMs);
+            var tickTimeStr = padZero(tickDateObj.getHours()) + ":" + padZero(tickDateObj.getMinutes());
+            var tickDateStr = padZero(tickDateObj.getDate()) + "/" + padZero(tickDateObj.getMonth() + 1) + "/" + tickDateObj.getFullYear();
+            await runSingleWorldTick(tickTimeStr, tickDateStr);
+        } else {
+            // Multiple ticks needed (catchup) - batch them into ONE LLM call instead of
+            // calling runSingleWorldTick repeatedly. Saves cost/time while still asking
+            // for one event per interval so the world progresses logically, not vaguely.
+            var intervalList = [];
+            for (var i = 0; i < ticksToRun; i++) {
+                var ivOffsetMs = (i + 1) * thresholdHours * 60 * 60 * 1000;
+                var ivDateObj = new Date(lastDateObj.getTime() + ivOffsetMs);
+                intervalList.push({
+                    time: padZero(ivDateObj.getHours()) + ":" + padZero(ivDateObj.getMinutes()),
+                    date: padZero(ivDateObj.getDate()) + "/" + padZero(ivDateObj.getMonth() + 1) + "/" + ivDateObj.getFullYear()
+                });
             }
-        })();
+            var lastInterval = intervalList[intervalList.length - 1];
+            await runBatchWorldTick(intervalList, lastTime, lastDate, lastInterval.time, lastInterval.date);
+        }
+        renderModal(); renderHUD();
+        clearHudStatus();
+        if (typeof toastr !== "undefined") { toastr.clear(); toastr.info(`World simulated: ${ticksToRun} tick(s) processed.`); }
+
+    } catch(e) {
+        console.error("[Story Tracker] World tick evaluation crashed:", e);
+        clearHudStatus();
+        if (typeof toastr !== "undefined") { toastr.clear(); toastr.error("World tick failed: " + e.message); }
+    } finally {
+        worldBusy = false;
     }
 }
