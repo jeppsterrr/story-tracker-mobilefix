@@ -3446,6 +3446,9 @@ function buildSettingsPanel() {
     $("#st-s-interval").val(settings.autoUpdateInterval).on("input", function() { 
         let val = parseInt(this.value, 10); 
         $("#st-interval-val").text(val); 
+        // Reset the message counter so the new interval is honored from this point forward,
+        // instead of waiting for msgCounter to naturally re-align to a multiple of the new value.
+        msgCounter = 0;
         if (storyData) {
             storyData.autoUpdateInterval = val;
             saveStoryData();
@@ -3537,6 +3540,13 @@ function buildSettingsPanel() {
     $("#st-s-rel-interval").val(settings.relAutoInterval || 5).on("input", function() {
         settings.relAutoInterval = parseInt(this.value, 10);
         $("#st-rel-interval-val").text(this.value);
+        // Reset the relationship message counter so the new interval is honored from this point
+        // forward, instead of waiting for relMsgCounter to naturally re-align to a multiple of it.
+        relMsgCounter = 0;
+        if (storyData) {
+            storyData._relMsgCount = 0;
+            saveStoryData();
+        }
         save();
         renderAutoInfo();
     });
