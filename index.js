@@ -2073,6 +2073,31 @@ function getEventSimilarity(str1, str2) {
     return intersection.size / union.size;
 }
 
+// --- Cap the world summary so it cannot grow unbounded over long RPs ---
+// The model is instructed to "advance" the existing summary each tick, which in practice
+// means it tends to append rather than condense. Since this summary is re-injected into
+// every future tick's prompt, an uncapped summary grows linearly with tick count and can
+// eventually push the combined prompt over the API's context limit (surfacing as a
+// "Bad Request" from the LLM endpoint). We hard-cap it here, keeping the most recent
+// (tail) content since that's the most relevant to ongoing continuity, and trimming to a
+// clean sentence/word boundary so it doesn't begin mid-word.
+var WORLD_SUMMARY_MAX_CHARS = 1200;
+function capWorldSummary(text) {
+    if (!text || typeof text !== "string") return text;
+    if (text.length <= WORLD_SUMMARY_MAX_CHARS) return text;
+    var truncated = text.slice(text.length - WORLD_SUMMARY_MAX_CHARS);
+    var firstBreak = truncated.search(/[.!?]\s+/);
+    if (firstBreak > -1 && firstBreak < WORLD_SUMMARY_MAX_CHARS * 0.4) {
+        truncated = truncated.slice(firstBreak + 1).trim();
+    } else {
+        var firstSpace = truncated.indexOf(" ");
+        if (firstSpace > -1 && firstSpace < 40) {
+            truncated = truncated.slice(firstSpace + 1);
+        }
+    }
+    return "(earlier history truncated) " + truncated.trim();
+}
+
 function isDuplicateEvent(newEventText) {
     if (!worldData || !worldData.worldEvents) return false;
     for (var i = 0; i < worldData.worldEvents.length; i++) {
@@ -2089,7 +2114,7 @@ async function runSingleWorldTick(timeStr, dateStr) {
 
     var tickDateObj = parseRpDateTime(timeStr, dateStr);
 
-    var sumBefore = worldData.worldSummary || "No world summary yet.";
+    var sumBefore = capWorldSummary(worldData.worldSummary) || "No world summary yet.";
     var revealsBefore = (worldData.pendingReveals || []).join("\n") || "None.";
 
     // Track active NPC States for context injection
@@ -2203,7 +2228,7 @@ async function runSingleWorldTick(timeStr, dateStr) {
     }
 
     // Save outputs and update state baseline parameters
-    worldData.worldSummary = data.summary;
+    worldData.worldSummary = capWorldSummary(data.summary);
     worldData.lastTickTime = timeStr;
     worldData.lastTickDate = dateStr;
     worldData._initialized = true; // Mark initialized to update the UI on modal render
@@ -2279,7 +2304,7 @@ async function runBatchWorldTick(intervalList, startTimeStr, startDateStr, endTi
 
     var tickDateObj = parseRpDateTime(endTimeStr, endDateStr);
 
-    var sumBefore = worldData.worldSummary || "No world summary yet.";
+    var sumBefore = capWorldSummary(worldData.worldSummary) || "No world summary yet.";
     var revealsBefore = (worldData.pendingReveals || []).join("\n") || "None.";
 
     var npcStatesText = "";
@@ -2384,7 +2409,7 @@ async function runBatchWorldTick(intervalList, startTimeStr, startDateStr, endTi
         throw new Error("Invalid batched World Agent response object.");
     }
 
-    worldData.worldSummary = data.summary;
+    worldData.worldSummary = capWorldSummary(data.summary);
     worldData.lastTickTime = endTimeStr;
     worldData.lastTickDate = endDateStr;
     worldData._initialized = true;
