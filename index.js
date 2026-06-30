@@ -341,6 +341,13 @@ function applyCustomAccentColor() {
     document.documentElement.style.setProperty('--st-custom-accent', `rgb(${r}, ${g}, ${b})`);
     document.documentElement.style.setProperty('--st-custom-accent-alpha', `rgba(${r}, ${g}, ${b}, 0.12)`);
     document.documentElement.style.setProperty('--st-custom-accent-alpha-high', `rgba(${r}, ${g}, ${b}, 0.25)`);
+
+    // Compute a contrast-safe text color (pure black or pure white) based on accent luminance.
+    // This keeps pill button text crisp/readable regardless of which accent color is picked,
+    // instead of a hardcoded dark gray that goes muddy on darker or saturated accents.
+    var luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+    var contrastText = luminance > 0.6 ? "#1c1c1a" : "#ffffff";
+    document.documentElement.style.setProperty('--st-custom-accent-text', contrastText);
     
     $("#st-rgb-preview").css("background-color", `rgb(${r}, ${g}, ${b})`);
 }
@@ -1344,6 +1351,9 @@ function buildModal() {
             if (worldControls) worldControls.style.setProperty('display', 'none', 'important');
             if (relControls) relControls.style.setProperty('display', 'none', 'important');
         }
+
+        // Refresh the footer countdown text to match whichever tab is now active
+        renderAutoInfo();
     });
 
     // World control routing
@@ -1640,14 +1650,63 @@ function updateSettingsUI() {
 }
 
 function renderAutoInfo() {
-    let hasData = isChatOpen() && storyData;
-    let autoUpdate = (hasData && storyData.autoUpdate !== undefined) ? storyData.autoUpdate : settings.autoUpdate;
-    let autoUpdateInterval = (hasData && storyData.autoUpdateInterval !== undefined) ? storyData.autoUpdateInterval : settings.autoUpdateInterval;
+    var hasData = isChatOpen() && storyData;
+    if (!hasData) { $("#st-auto-info").text("No active chat"); return; }
 
-    if(!autoUpdate) { $("#st-auto-info").text("Auto-update: OFF"); return; }
-    if(!hasData) { $("#st-auto-info").text("No active chat"); return; }
-    let rem = autoUpdateInterval - (msgCounter % autoUpdateInterval);
+    // Show the countdown relevant to whichever tab is currently active, since each
+    // agent (scene/world/relations) has its own independent interval and settings.
+    var activeTarget = $(".st-tab.st-tab-active").data("target") || "st-tab-current";
+
+    if (activeTarget === "st-tab-world") {
+        renderWorldAutoInfo();
+        return;
+    }
+    if (activeTarget === "st-tab-relations") {
+        renderRelAutoInfo();
+        return;
+    }
+
+    // Default: Scene tracker countdown (Current / History tabs)
+    var autoUpdate = (storyData.autoUpdate !== undefined) ? storyData.autoUpdate : settings.autoUpdate;
+    var autoUpdateInterval = (storyData.autoUpdateInterval !== undefined) ? storyData.autoUpdateInterval : settings.autoUpdateInterval;
+    if (!autoUpdate) { $("#st-auto-info").text("Auto-update: OFF"); return; }
+    var rem = autoUpdateInterval - (msgCounter % autoUpdateInterval);
     $("#st-auto-info").text(`Auto-update in ${rem} msg(s)`);
+}
+
+function renderWorldAutoInfo() {
+    if (!settings.enabled || !settings.worldEnabled) { $("#st-auto-info").text("World Agent: OFF"); return; }
+    if (settings.worldTickFrequency === "manual") { $("#st-auto-info").text("World Agent: Manual only"); return; }
+
+    var thresholdHours = 1;
+    if (settings.worldTickFrequency === "3h") thresholdHours = 3;
+    else if (settings.worldTickFrequency === "1d") thresholdHours = 24;
+
+    if (!worldData || !worldData.lastTickTime || !worldData.lastTickDate || !storyData || !storyData.time || !storyData.date) {
+        $("#st-auto-info").text(`World tick every ${thresholdHours}h (RP time)`);
+        return;
+    }
+
+    var lastDateObj = parseRpDateTime(worldData.lastTickTime, worldData.lastTickDate);
+    var curDateObj = parseRpDateTime(storyData.time, storyData.date);
+    if (!lastDateObj || !curDateObj) { $("#st-auto-info").text(`World tick every ${thresholdHours}h (RP time)`); return; }
+
+    var elapsedHours = (curDateObj.getTime() - lastDateObj.getTime()) / (1000 * 60 * 60);
+    var remHours = thresholdHours - (elapsedHours % thresholdHours);
+    if (remHours <= 0 || elapsedHours >= thresholdHours) {
+        $("#st-auto-info").text("World tick: due now");
+    } else {
+        $("#st-auto-info").text(`World tick in ~${remHours.toFixed(1)}h (RP time)`);
+    }
+}
+
+function renderRelAutoInfo() {
+    if (!settings.enabled || !settings.relationsEnabled) { $("#st-auto-info").text("Relationship Tracker: OFF"); return; }
+    if (!settings.relationsAutoUpdate) { $("#st-auto-info").text("Relationship Tracker: Manual only"); return; }
+
+    var relInterval = settings.relAutoInterval || 5;
+    var rem = relInterval - (relMsgCounter % relInterval);
+    $("#st-auto-info").text(`Relations update in ${rem} msg(s)`);
 }
 
 // --- Core LLM Scene Update Engine ---
@@ -3177,6 +3236,7 @@ function buildSettingsPanel() {
         settings.autoUpdateInterval = val; // Also acts as default for future chats
         save(); 
         renderModal(); 
+        renderAutoInfo();
     });
     $("#st-interval-val").text(settings.autoUpdateInterval);
     
@@ -3218,7 +3278,7 @@ function buildSettingsPanel() {
 
     // World Agent Settings Element Bindings
     $("#st-s-world-on").prop("checked", settings.worldEnabled).on("change", function() {
-        settings.worldEnabled = this.checked; save(); renderHUD(); renderModal();
+        settings.worldEnabled = this.checked; save(); renderHUD(); renderModal(); renderAutoInfo();
     });
     $("#st-s-world-inject").prop("checked", settings.injectWorldContext).on("change", function() {
         settings.injectWorldContext = this.checked; save();
@@ -3237,6 +3297,7 @@ function buildSettingsPanel() {
 
     $("#st-s-world-freq").val(settings.worldTickFrequency).on("change", function() {
         settings.worldTickFrequency = this.value; save();
+        renderAutoInfo();
     });
 
     $("#st-s-max-ticks").val(settings.maxWorldTicks).on("input", function() {
@@ -3248,17 +3309,19 @@ function buildSettingsPanel() {
 
     // Relationship Tracker Settings Element Bindings
     $("#st-s-rel-on").prop("checked", settings.relationsEnabled).on("change", function() {
-        settings.relationsEnabled = this.checked; save(); renderHUD(); renderModal();
+        settings.relationsEnabled = this.checked; save(); renderHUD(); renderModal(); renderAutoInfo();
     });
     $("#st-s-rel-auto").prop("checked", settings.relationsAutoUpdate).on("change", function() {
         settings.relationsAutoUpdate = this.checked; save();
         $("#st-rel-interval-row").toggle(this.checked);
+        renderAutoInfo();
     });
     $("#st-rel-interval-row").toggle(settings.relationsAutoUpdate);
     $("#st-s-rel-interval").val(settings.relAutoInterval || 5).on("input", function() {
         settings.relAutoInterval = parseInt(this.value, 10);
         $("#st-rel-interval-val").text(this.value);
         save();
+        renderAutoInfo();
     });
     $("#st-rel-interval-val").text(settings.relAutoInterval || 5);
     $("#st-s-rel-useprofile").prop("checked", settings.useRelProfile).on("change", function() {
