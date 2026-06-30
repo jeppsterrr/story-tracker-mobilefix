@@ -383,7 +383,8 @@
 
 .st-footer {
     display: flex !important;
-    gap: 12px !important;
+    flex-wrap: wrap !important;
+    gap: 8px 12px !important;
     padding: 16px 24px 24px !important;
     align-items: center !important;
     justify-content: flex-start !important;
@@ -406,6 +407,8 @@
     text-align: right !important;
     flex-grow: 1 !important;
     white-space: nowrap !important;
+    min-width: 100% !important;
+    margin-top: 2px !important;
 }
 
 /* Pill buttons */
