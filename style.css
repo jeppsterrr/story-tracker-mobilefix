@@ -412,7 +412,7 @@
 #st-modal .st-footer button.menu_button.st-pill-btn,
 #st-modal .st-footer .st-world-controls button.menu_button.st-pill-btn {
     background: var(--st-custom-accent) !important;
-    color: #1c1c1a !important;
+    color: var(--st-custom-accent-text, #1c1c1a) !important;
     border: none !important;
     border-radius: 30px !important;
     font-weight: 600 !important;
@@ -426,6 +426,8 @@
     cursor: pointer !important;
     white-space: nowrap !important;
     min-height: 44px !important;
+    -webkit-font-smoothing: antialiased !important;
+    text-rendering: optimizeLegibility !important;
 }
 
 #st-modal .st-footer button.menu_button.st-pill-btn:hover,
@@ -713,7 +715,7 @@
 /* Extend pill-button styles to relations controls */
 #st-modal .st-footer .st-relations-controls button.menu_button.st-pill-btn {
     background: var(--st-custom-accent) !important;
-    color: #1c1c1a !important;
+    color: var(--st-custom-accent-text, #1c1c1a) !important;
     border: none !important;
     border-radius: 30px !important;
     font-weight: 600 !important;
@@ -727,6 +729,8 @@
     cursor: pointer !important;
     white-space: nowrap !important;
     min-height: 44px !important;
+    -webkit-font-smoothing: antialiased !important;
+    text-rendering: optimizeLegibility !important;
 }
 
 #st-modal .st-footer .st-relations-controls button.menu_button.st-pill-btn:hover {
