@@ -2912,8 +2912,11 @@ function applyHudStyle() {
         var oY = (clamped.y + ($h.outerHeight() || 0) / 2) > window.innerHeight / 2 ? "bottom" : "top";
         origin = oY + " " + oX;
     } else {
-        // No saved position — let the stylesheet decide (bottom-right corner etc.)
-        $h.css({ "left": "", "top": "", "right": "", "bottom": "" });
+        // No saved position - explicitly set a safe bottom-right default rather than
+        // clearing to empty strings. Some browsers (notably Firefox) can render a
+        // position:fixed element with no offsets in normal document flow instead of
+        // the stylesheet's intended corner, making the HUD invisible/off-screen.
+        $h.css({ "left": "auto", "top": "auto", "right": "20px", "bottom": "90px" });
     }
 
     $h.css({ "transform": "scale(" + scale + ")", "transform-origin": origin });
