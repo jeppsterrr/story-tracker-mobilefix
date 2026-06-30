@@ -1178,14 +1178,45 @@ function injectContextToChat() {
         }
     }
 
-    if (!finalInj) return;
-    
+    if (!finalInj) {
+        // Nothing to inject this turn - clear any previous injection so stale
+        // context doesn't linger in the prompt after tracking is disabled.
+        try {
+            if (scriptModule.setExtensionPrompt) {
+                scriptModule.setExtensionPrompt("STORY_TRACKER_CONTEXT", "", 1, 0, false, 0);
+            }
+        } catch (e) { /* no-op */ }
+        return;
+    }
+
     try {
-        var ex = scriptModule.chat_metadata.authorsNote || "";
-        var mk = "<!-- ST_INJECT -->", emk = "<!-- /ST_INJECT -->";
-        var cl = ex.replace(new RegExp(mk + "[\\s\\S]*?" + emk, "g"), "").trim();
-        scriptModule.chat_metadata.authorsNote = cl + (cl ? "\n" : "") + mk + "\n" + finalInj + "\n" + emk;
-    } catch(e) { console.error("[Story Tracker] Inject error:", e); }
+        // setExtensionPrompt is the official mechanism extensions use to inject
+        // content into the actual generation prompt (the same API SillyTavern's
+        // own Memory/Summarize and World Info systems use internally). Writing
+        // directly to chat_metadata.authorsNote is NOT read by SillyTavern's
+        // prompt builder (the real Author's Note key is note_prompt), so that
+        // approach silently did nothing - this fixes it.
+        //
+        // Position 1 = IN_CHAT (in_prompt=0, in_chat=1, before_prompt=2)
+        // Depth 0 = inserted right after the most recent message
+        // Role 0 = SYSTEM
+        var posTypes = scriptModule.extension_prompt_types || { IN_PROMPT: 0, IN_CHAT: 1, BEFORE_PROMPT: 2 };
+        var roleTypes = scriptModule.extension_prompt_roles || { SYSTEM: 0, USER: 1, ASSISTANT: 2 };
+        scriptModule.setExtensionPrompt(
+            "STORY_TRACKER_CONTEXT",
+            finalInj,
+            posTypes.IN_CHAT,
+            0,
+            false,
+            roleTypes.SYSTEM
+        );
+
+        // Clean up the old (non-functional) injection key so it doesn't linger
+        // in chat_metadata for users upgrading from a previous version.
+        if (scriptModule.chat_metadata && scriptModule.chat_metadata.authorsNote) {
+            delete scriptModule.chat_metadata.authorsNote;
+        }
+    } catch (e) { console.error("[Story Tracker] Inject error:", e); }
 }
 
 // --- Event Handling ---
